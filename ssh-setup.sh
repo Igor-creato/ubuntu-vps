@@ -1,70 +1,43 @@
 #!/bin/bash
 # ssh-setup.sh
-# Исправлен: --port теперь запускает с выбора порта без создания пользователя
+# Безопасная настройка SSH: создание пользователя, ключей, смена порта
+# Поддержка --port — переход к выбору порта без создания пользователя
 
 set -euo pipefail
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 print_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
-if [[ $EUID -ne 0 ]]; then
-    print_error "Запустите скрипт от root: sudo $0"
-    exit 1
-fi
+[[ $EUID -ne 0 ]] && { print_error "Запустите скрипт от root: sudo $0"; exit 1; }
 
-# Обработка флага --port
-SKIP_TO_PORT=false
-if [[ "${1:-}" == "--port" ]]; then
-    SKIP_TO_PORT=true
-fi
+SKIP=false
+[[ "${1:-}" == "--port" ]] && SKIP=true
 
-# Проверка имени пользователя
-validate_username() {
-    local name=$1
-    [[ $name =~ ^[a-z_][a-z0-9._-]{0,31}$ ]] && ! id "$name" &>/dev/null
-}
-
-# Проверка порта
 validate_port() {
     local port=$1
     [[ $port =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 65535 )) && ! ss -tulnp | grep -q ":$port "
 }
 
-# --- Определение пользователя ---
-if [[ "$SKIP_TO_PORT" == true ]]; then
-    # В режиме --port требуем существующего пользователя
-    read -p "Введите имя существующего пользователя для настройки порта: " username
-    if ! id "$username" &>/dev/null; then
-        print_error "Пользователь '$username' не найден. Запустите без --port."
-        exit 1
-    fi
+# --- Выбор/создание пользователя ---
+if [[ "$SKIP" == true ]]; then
+    read -p "Введите имя существующего пользователя: " username
+    id "$username" &>/dev/null || { print_error "Пользователь '$username' не найден"; exit 1; }
 else
-    # Обычный режим — создаём пользователя
-    while true; do
+    read -p "Введите имя нового пользователя: " username
+    while ! [[ $username =~ ^[a-z_][a-z0-9._-]{0,31}$ ]] || id "$username" &>/dev/null; do
+        print_error "Неверное имя или пользователь существует"
         read -p "Введите имя нового пользователя: " username
-        if validate_username "$username"; then
-            break
-        else
-            print_error "Неверное имя или пользователь существует"
-        fi
     done
-
-    print_info "Создаю пользователя: $username"
     useradd -m -s /bin/bash "$username"
     usermod -aG sudo "$username"
-    print_success "Пользователь $username создан и добавлен в sudo"
+    print_success "Пользователь $username создан"
 fi
 
 # --- SSH-ключи (только в обычном режиме) ---
-if [[ "$SKIP_TO_PORT" != true ]]; then
+if [[ "$SKIP" != true ]]; then
     print_info "\n=== Настройка SSH-ключей ==="
 
     root_key=""
@@ -77,7 +50,7 @@ if [[ "$SKIP_TO_PORT" != true ]]; then
     if [[ -n "$root_key" ]]; then
         print_info "Найден ключ у root: $root_key"
         print_info "Выберите:"
-        echo "1 - Перенести ключ к новому пользователю и удалить у root"
+        echo "1 - Перенести ключ к пользователю и удалить у root"
         echo "2 - Ввести свой ключ"
         echo "3 - Сгенерировать новый ключ"
 
@@ -159,12 +132,11 @@ if [[ "$SKIP_TO_PORT" != true ]]; then
     print_success "SSH-ключ добавлен"
 fi
 
-# --- Порт SSH (всегда выполняется) ---
+# --- Порт SSH ---
 print_info "\n=== Изменение порта SSH ==="
-
 while true; do
     read -p "Введите новый порт (1024-65535) или 'no' для выхода: " new_port
-    [[ "$new_port" == "no" ]] && print_info "Выход из скрипта" && exit 0
+    [[ "$new_port" == "no" ]] && exit 0
     if validate_port "$new_port"; then
         break
     else
@@ -176,12 +148,8 @@ backup="/etc/ssh/sshd_config.bak.$(date +%Y%m%d-%H%M%S)"
 cp /etc/ssh/sshd_config "$backup"
 print_success "Резервная копия: $backup"
 
-# Открытие порта в UFW
-if systemctl is-active --quiet ufw; then
-    ufw allow "$new_port/tcp" >/dev/null 2>&1 || true
-fi
+systemctl is-active --quiet ufw && ufw allow "$new_port/tcp" >/dev/null 2>&1 || true
 
-# Применение настроек
 sed -i "s/^#\?Port.*/Port $new_port/" /etc/ssh/sshd_config
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
@@ -190,34 +158,15 @@ grep -q "^AllowUsers" /etc/ssh/sshd_config && \
     sed -i "s/^AllowUsers.*/AllowUsers $username/" /etc/ssh/sshd_config || \
     echo "AllowUsers $username" >> /etc/ssh/sshd_config
 
-if ! sshd -t; then
-    print_error "Ошибка в конфигурации. Восстановление..."
-    cp "$backup" /etc/ssh/sshd_config
-    systemctl restart sshd
-    exit 1
-fi
-
+sshd -t || { print_error "Ошибка конфигурации"; exit 1; }
 systemctl restart sshd
-print_success "SSH перезапущен на порту $new_port"
 
-# --- Проверка подключения ---
-print_warning "\nПроверьте подключение:"
-print_info "ssh -p $new_port $username@$(hostname -I | awk '{print $1}')"
+print_info "SSH перезапущен на порту $new_port"
+print_info "Проверьте: ssh -p $new_port $username@$(hostname -I | awk '{print $1}')"
 
-while true; do
-    read -p "Подключение успешно? Введите 'yes' или 'no' для выхода: " confirm
-    [[ "$confirm" == "yes" ]] && break
-    [[ "$confirm" == "no" ]] && print_info "Выход из скрипта" && exit 0
-    print_error "Введите 'yes' или 'no'"
-done
-
-# Закрытие 22 в UFW
-if systemctl is-active --quiet ufw; then
-    ufw delete allow 22/tcp >/dev/null 2>&1 || true
-fi
+systemctl is-active --quiet ufw && ufw delete allow 22/tcp >/dev/null 2>&1 || true
 
 print_success "\n=== Готово ==="
-print_info "Подключение:"
 print_info "  Порт: $new_port"
 print_info "  Пользователь: $username"
 print_info "  Только по ключу"
