@@ -10,3 +10,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/secure_ssh_setup.sh)
 ```
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/ssh-setup.sh)
+```
