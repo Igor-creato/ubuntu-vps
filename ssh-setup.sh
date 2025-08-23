@@ -52,10 +52,14 @@ read_key_input() {
 
 # --- Если --port, пропустить до выбора порта ---
 if [[ "$SKIP_TO_PORT" == true ]]; then
-    print_info "Режим --port: пропуск создания пользователя и ключей"
-    print_info "Перезапустите без --port для полной настройки"
-    exit 0
-fi
+    print_info "Режим --port: запускаемся с выбора порта"
+    # username уже должен существовать!
+    if ! id "$username" &>/dev/null; then
+        print_error "Пользователь $username не найден. Запустите без --port."
+        exit 1
+    fi
+    # пропускаем создание пользователя и ключей
+else
 
 # --- Создание пользователя ---
 if [[ "$SKIP_TO_PORT" != true ]]; then
