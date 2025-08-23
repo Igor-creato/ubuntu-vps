@@ -1,7 +1,6 @@
 #!/bin/bash
-
-# secure_ssh_setup_final.sh
-# Финальная версия: поддержка --port, выход по no, упрощённый выбор
+# ssh-setup.sh
+# Исправлен: --port теперь запускает с выбора порта без создания пользователя
 
 set -euo pipefail
 
@@ -39,30 +38,16 @@ validate_port() {
     [[ $port =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 65535 )) && ! ss -tulnp | grep -q ":$port "
 }
 
-# Чтение ключа
-read_key_input() {
-    print_info "Введите публичный ключ (OpenSSH или SSH2), затем Ctrl+D:"
-    key_input=$(cat)
-    if echo "$key_input" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
-        echo "$key_input" | ssh-keygen -i -f /dev/stdin 2>/dev/null
-    else
-        echo "$key_input"
-    fi
-}
-
-# --- Если --port, пропустить до выбора порта ---
+# --- Определение пользователя ---
 if [[ "$SKIP_TO_PORT" == true ]]; then
-    print_info "Режим --port: запускаемся с выбора порта"
-    # username уже должен существовать!
+    # В режиме --port требуем существующего пользователя
+    read -p "Введите имя существующего пользователя для настройки порта: " username
     if ! id "$username" &>/dev/null; then
-        print_error "Пользователь $username не найден. Запустите без --port."
+        print_error "Пользователь '$username' не найден. Запустите без --port."
         exit 1
     fi
-    # пропускаем создание пользователя и ключей
 else
-
-# --- Создание пользователя ---
-if [[ "$SKIP_TO_PORT" != true ]]; then
+    # Обычный режим — создаём пользователя
     while true; do
         read -p "Введите имя нового пользователя: " username
         if validate_username "$username"; then
@@ -75,92 +60,106 @@ if [[ "$SKIP_TO_PORT" != true ]]; then
     print_info "Создаю пользователя: $username"
     useradd -m -s /bin/bash "$username"
     usermod -aG sudo "$username"
-    print_success "Пользователь $username создан"
+    print_success "Пользователь $username создан и добавлен в sudo"
 fi
 
-# --- SSH-ключи ---
-print_info "\n=== Настройка SSH-ключей ==="
+# --- SSH-ключи (только в обычном режиме) ---
+if [[ "$SKIP_TO_PORT" != true ]]; then
+    print_info "\n=== Настройка SSH-ключей ==="
 
-root_key=""
-for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
-    [[ -f "$f" ]] && root_key="$f" && break
-done
-
-ssh_key=""
-
-if [[ -n "$root_key" ]]; then
-    print_info "Найден ключ у root: $root_key"
-    print_info "Выберите:"
-    echo "1 - Перенести ключ к новому пользователю и удалить у root"
-    echo "2 - Ввести свой ключ"
-    echo "3 - Сгенерировать новый ключ"
-
-    while true; do
-        read -p "Ваш выбор (1/2/3): " choice
-        case $choice in
-            1)
-                ssh_key=$(cat "$root_key")
-                rm -f "$root_key" "${root_key%.pub}"
-                print_success "Ключ перенесён и удалён у root"
-                break
-                ;;
-            2)
-                ssh_key=$(read_key_input)
-                [[ -n "$ssh_key" ]] && break
-                print_error "Ошибка в формате ключа"
-                ;;
-            3)
-                temp_dir=$(mktemp -d)
-                ssh-keygen -t ed25519 -f "$temp_dir/id_ed25519" -N "" -C "$username@$(hostname)"
-                ssh_key=$(cat "$temp_dir/id_ed25519.pub")
-                print_success "Ключ сгенерирован:"
-                cat "$temp_dir/id_ed25519"
-                rm -rf "$temp_dir"
-                break
-                ;;
-            *)
-                print_error "Выберите 1, 2 или 3"
-                ;;
-        esac
+    root_key=""
+    for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
+        [[ -f "$f" ]] && root_key="$f" && break
     done
-else
-    print_info "Ключ у root не найден"
-    print_info "Выберите:"
-    echo "1 - Ввести свой ключ"
-    echo "2 - Сгенерировать новый"
 
-    while true; do
-        read -p "Ваш выбор (1/2): " choice
-        case $choice in
-            1)
-                ssh_key=$(read_key_input)
-                [[ -n "$ssh_key" ]] && break
-                print_error "Ошибка в формате ключа"
-                ;;
-            2)
-                temp_dir=$(mktemp -d)
-                ssh-keygen -t ed25519 -f "$temp_dir/id_ed25519" -N "" -C "$username@$(hostname)"
-                ssh_key=$(cat "$temp_dir/id_ed25519.pub")
-                print_success "Ключ сгенерирован:"
-                cat "$temp_dir/id_ed25519"
-                rm -rf "$temp_dir"
-                break
-                ;;
-            *)
-                print_error "Выберите 1 или 2"
-                ;;
-        esac
-    done
+    ssh_key=""
+
+    if [[ -n "$root_key" ]]; then
+        print_info "Найден ключ у root: $root_key"
+        print_info "Выберите:"
+        echo "1 - Перенести ключ к новому пользователю и удалить у root"
+        echo "2 - Ввести свой ключ"
+        echo "3 - Сгенерировать новый ключ"
+
+        while true; do
+            read -p "Ваш выбор (1/2/3): " choice
+            case $choice in
+                1)
+                    ssh_key=$(cat "$root_key")
+                    rm -f "$root_key" "${root_key%.pub}"
+                    print_success "Ключ перенесён и удалён у root"
+                    break
+                    ;;
+                2)
+                    print_info "Введите публичный ключ, затем Ctrl+D:"
+                    key_input=$(cat)
+                    if echo "$key_input" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
+                        ssh_key=$(echo "$key_input" | ssh-keygen -i -f /dev/stdin 2>/dev/null)
+                    else
+                        ssh_key="$key_input"
+                    fi
+                    [[ -n "$ssh_key" ]] && break
+                    print_error "Ошибка в формате ключа"
+                    ;;
+                3)
+                    temp_dir=$(mktemp -d)
+                    ssh-keygen -t ed25519 -f "$temp_dir/id_ed25519" -N "" -C "$username@$(hostname)"
+                    ssh_key=$(cat "$temp_dir/id_ed25519.pub")
+                    print_success "Ключ сгенерирован:"
+                    cat "$temp_dir/id_ed25519"
+                    rm -rf "$temp_dir"
+                    break
+                    ;;
+                *)
+                    print_error "Выберите 1, 2 или 3"
+                    ;;
+            esac
+        done
+    else
+        print_info "Ключ у root не найден"
+        print_info "Выберите:"
+        echo "1 - Ввести свой ключ"
+        echo "2 - Сгенерировать новый"
+
+        while true; do
+            read -p "Ваш выбор (1/2): " choice
+            case $choice in
+                1)
+                    print_info "Введите публичный ключ, затем Ctrl+D:"
+                    key_input=$(cat)
+                    if echo "$key_input" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
+                        ssh_key=$(echo "$key_input" | ssh-keygen -i -f /dev/stdin 2>/dev/null)
+                    else
+                        ssh_key="$key_input"
+                    fi
+                    [[ -n "$ssh_key" ]] && break
+                    print_error "Ошибка в формате ключа"
+                    ;;
+                2)
+                    temp_dir=$(mktemp -d)
+                    ssh-keygen -t ed25519 -f "$temp_dir/id_ed25519" -N "" -C "$username@$(hostname)"
+                    ssh_key=$(cat "$temp_dir/id_ed25519.pub")
+                    print_success "Ключ сгенерирован:"
+                    cat "$temp_dir/id_ed25519"
+                    rm -rf "$temp_dir"
+                    break
+                    ;;
+                *)
+                    print_error "Выберите 1 или 2"
+                    ;;
+            esac
+        done
+    fi
+
+    mkdir -p "/home/$username/.ssh"
+    echo "$ssh_key" >> "/home/$username/.ssh/authorized_keys"
+    chmod 700 "/home/$username/.ssh"
+    chmod 600 "/home/$username/.ssh/authorized_keys"
+    chown -R "$username:$username" "/home/$username/.ssh"
+    print_success "SSH-ключ добавлен"
 fi
 
-mkdir -p "/home/$username/.ssh"
-echo "$ssh_key" >> "/home/$username/.ssh/authorized_keys"
-chmod 700 "/home/$username/.ssh"
-chmod 600 "/home/$username/.ssh/authorized_keys"
-chown -R "$username:$username" "/home/$username/.ssh"
-print_success "SSH-ключ добавлен"
-
-# --- Порт SSH ---
+# --- Порт SSH (всегда выполняется) ---
 print_info "\n=== Изменение порта SSH ==="
 
 while true; do
