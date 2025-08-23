@@ -43,7 +43,7 @@ if [[ "$SKIP" != true ]]; then
     print_info "\n=== Настройка SSH-ключей ==="
 
     root_key=""
-    for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
+    for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub /root/.ssh/authorized_keys; do
         [[ -f "$f" ]] && root_key="$f" && break
     done
 
