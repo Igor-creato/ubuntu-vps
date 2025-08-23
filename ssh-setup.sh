@@ -33,6 +33,8 @@ else
     done
     useradd -m -s /bin/bash "$username"
     usermod -aG sudo "$username"
+    echo "$username ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$username"
+sudo chmod 440 /etc/sudoers.d/"$username"
     print_success "Пользователь $username создан"
 fi
 
