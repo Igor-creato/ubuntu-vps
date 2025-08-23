@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# secure_ssh_setup_v2.sh
-# Исправленный и улучшенный скрипт для безопасной настройки SSH
-# Запускать только от root!
+# secure_ssh_setup_final.sh
+# Финальная версия: поддержка --port, выход по no, упрощённый выбор
 
 set -euo pipefail
 
@@ -18,46 +17,77 @@ print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
 if [[ $EUID -ne 0 ]]; then
-    print_error "Этот скрипт должен быть запущен с правами root!"
+    print_error "Запустите скрипт от root: sudo $0"
     exit 1
 fi
 
-print_info "=== Безопасная настройка SSH ==="
+# Обработка флага --port
+SKIP_TO_PORT=false
+if [[ "${1:-}" == "--port" ]]; then
+    SKIP_TO_PORT=true
+fi
 
-# Валидация имени пользователя
+# Проверка имени пользователя
 validate_username() {
     local name=$1
     [[ $name =~ ^[a-z_][a-z0-9._-]{0,31}$ ]] && ! id "$name" &>/dev/null
 }
 
-while true; do
-    read -p "Введите имя нового пользователя: " username
-    if validate_username "$username"; then
-        break
+# Проверка порта
+validate_port() {
+    local port=$1
+    [[ $port =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 65535 )) && ! ss -tulnp | grep -q ":$port "
+}
+
+# Чтение ключа
+read_key_input() {
+    print_info "Введите публичный ключ (OpenSSH или SSH2), затем Ctrl+D:"
+    key_input=$(cat)
+    if echo "$key_input" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
+        echo "$key_input" | ssh-keygen -i -f /dev/stdin 2>/dev/null
     else
-        print_error "Неверное имя или пользователь уже существует."
+        echo "$key_input"
     fi
-done
+}
 
-print_info "Создаю пользователя: $username"
-useradd -m -s /bin/bash "$username"
-usermod -aG sudo "$username"
-print_success "Пользователь $username создан и добавлен в sudo"
+# --- Если --port, пропустить до выбора порта ---
+if [[ "$SKIP_TO_PORT" == true ]]; then
+    print_info "Режим --port: пропуск создания пользователя и ключей"
+    print_info "Перезапустите без --port для полной настройки"
+    exit 0
+fi
 
-# --- Проверка и перенос ключа у root ---
-print_info "\n=== Проверка SSH-ключей у root ==="
+# --- Создание пользователя ---
+if [[ "$SKIP_TO_PORT" != true ]]; then
+    while true; do
+        read -p "Введите имя нового пользователя: " username
+        if validate_username "$username"; then
+            break
+        else
+            print_error "Неверное имя или пользователь существует"
+        fi
+    done
 
-root_key_file=""
+    print_info "Создаю пользователя: $username"
+    useradd -m -s /bin/bash "$username"
+    usermod -aG sudo "$username"
+    print_success "Пользователь $username создан"
+fi
+
+# --- SSH-ключи ---
+print_info "\n=== Настройка SSH-ключей ==="
+
+root_key=""
 for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
-    [[ -f "$f" ]] && root_key_file="$f" && break
+    [[ -f "$f" ]] && root_key="$f" && break
 done
 
 ssh_key=""
 
-if [[ -n "$root_key_file" ]]; then
-    print_info "Найден SSH-ключ у root: $root_key_file"
-    print_info "Выберите действие:"
-    echo "1 - Перенести этот ключ к новому пользователю и удалить у root"
+if [[ -n "$root_key" ]]; then
+    print_info "Найден ключ у root: $root_key"
+    print_info "Выберите:"
+    echo "1 - Перенести ключ к новому пользователю и удалить у root"
     echo "2 - Ввести свой ключ"
     echo "3 - Сгенерировать новый ключ"
 
@@ -65,25 +95,15 @@ if [[ -n "$root_key_file" ]]; then
         read -p "Ваш выбор (1/2/3): " choice
         case $choice in
             1)
-                ssh_key=$(cat "$root_key_file")
-                rm -f "$root_key_file"
-                rm -f "${root_key_file%.pub}"
+                ssh_key=$(cat "$root_key")
+                rm -f "$root_key" "${root_key%.pub}"
                 print_success "Ключ перенесён и удалён у root"
                 break
                 ;;
             2)
-                print_info "Введите публичный ключ (OpenSSH или SSH2), затем Ctrl+D:"
-                key_input=$(cat)
-                if echo "$key_input" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
-                    ssh_key=$(echo "$key_input" | ssh-keygen -i -f /dev/stdin 2>/dev/null)
-                else
-                    ssh_key="$key_input"
-                fi
-                if [[ -n "$ssh_key" ]]; then
-                    break
-                else
-                    print_error "Ошибка в формате ключа."
-                fi
+                ssh_key=$(read_key_input)
+                [[ -n "$ssh_key" ]] && break
+                print_error "Ошибка в формате ключа"
                 ;;
             3)
                 temp_dir=$(mktemp -d)
@@ -100,7 +120,7 @@ if [[ -n "$root_key_file" ]]; then
         esac
     done
 else
-    print_info "Ключ у root не найден."
+    print_info "Ключ у root не найден"
     print_info "Выберите:"
     echo "1 - Ввести свой ключ"
     echo "2 - Сгенерировать новый"
@@ -109,15 +129,9 @@ else
         read -p "Ваш выбор (1/2): " choice
         case $choice in
             1)
-                print_info "Введите публичный ключ, затем Ctrl+D:"
-                key_input=$(cat)
-                if echo "$key_input" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
-                    ssh_key=$(echo "$key_input" | ssh-keygen -i -f /dev/stdin 2>/dev/null)
-                else
-                    ssh_key="$key_input"
-                fi
+                ssh_key=$(read_key_input)
                 [[ -n "$ssh_key" ]] && break
-                print_error "Ошибка в формате ключа."
+                print_error "Ошибка в формате ключа"
                 ;;
             2)
                 temp_dir=$(mktemp -d)
@@ -140,32 +154,27 @@ echo "$ssh_key" >> "/home/$username/.ssh/authorized_keys"
 chmod 700 "/home/$username/.ssh"
 chmod 600 "/home/$username/.ssh/authorized_keys"
 chown -R "$username:$username" "/home/$username/.ssh"
-print_success "SSH-ключ добавлен для $username"
+print_success "SSH-ключ добавлен"
 
-# --- Изменение порта ---
+# --- Порт SSH ---
 print_info "\n=== Изменение порта SSH ==="
 
-validate_port() {
-    local port=$1
-    [[ $port =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 65535 )) && ! ss -tulnp | grep -q ":$port "
-}
-
 while true; do
-    read -p "Введите новый порт SSH (1024-65535): " new_port
+    read -p "Введите новый порт (1024-65535) или 'no' для выхода: " new_port
+    [[ "$new_port" == "no" ]] && print_info "Выход из скрипта" && exit 0
     if validate_port "$new_port"; then
         break
     else
-        print_error "Порт занят или недопустим."
+        print_error "Порт недопустим или занят"
     fi
 done
 
 backup="/etc/ssh/sshd_config.bak.$(date +%Y%m%d-%H%M%S)"
 cp /etc/ssh/sshd_config "$backup"
-print_success "Создана резервная копия: $backup"
+print_success "Резервная копия: $backup"
 
-# Открытие порта в UFW (если включён)
+# Открытие порта в UFW
 if systemctl is-active --quiet ufw; then
-    print_info "Открываю порт $new_port в UFW..."
     ufw allow "$new_port/tcp" >/dev/null 2>&1 || true
 fi
 
@@ -178,9 +187,8 @@ grep -q "^AllowUsers" /etc/ssh/sshd_config && \
     sed -i "s/^AllowUsers.*/AllowUsers $username/" /etc/ssh/sshd_config || \
     echo "AllowUsers $username" >> /etc/ssh/sshd_config
 
-# Проверка конфигурации
 if ! sshd -t; then
-    print_error "Ошибка в конфигурации SSH. Восстановление из резервной копии..."
+    print_error "Ошибка в конфигурации. Восстановление..."
     cp "$backup" /etc/ssh/sshd_config
     systemctl restart sshd
     exit 1
@@ -190,24 +198,23 @@ systemctl restart sshd
 print_success "SSH перезапущен на порту $new_port"
 
 # --- Проверка подключения ---
-print_warning "\nВАЖНО: Проверьте подключение перед закрытием порта 22"
-print_info "Команда для проверки:"
+print_warning "\nПроверьте подключение:"
 print_info "ssh -p $new_port $username@$(hostname -I | awk '{print $1}')"
 
 while true; do
-    read -p "Вы успешно подключились по новому порту? Введите 'yes': " confirm
+    read -p "Подключение успешно? Введите 'yes' или 'no' для выхода: " confirm
     [[ "$confirm" == "yes" ]] && break
-    print_error "Проверьте подключение и введите 'yes'"
+    [[ "$confirm" == "no" ]] && print_info "Выход из скрипта" && exit 0
+    print_error "Введите 'yes' или 'no'"
 done
 
-# Закрытие порта 22 в UFW (если включён)
+# Закрытие 22 в UFW
 if systemctl is-active --quiet ufw; then
-    print_info "Закрываю порт 22 в UFW..."
     ufw delete allow 22/tcp >/dev/null 2>&1 || true
 fi
 
 print_success "\n=== Готово ==="
-print_info "Доступ только по:"
+print_info "Подключение:"
 print_info "  Порт: $new_port"
 print_info "  Пользователь: $username"
 print_info "  Только по ключу"
