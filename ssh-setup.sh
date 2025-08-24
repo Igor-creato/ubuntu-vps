@@ -5,6 +5,52 @@
 
 set -euo pipefail
 
+# ----------------------------------------------------------
+# 0. Подготовка системы: обновления, чистка, фаервол, fail2ban
+# ----------------------------------------------------------
+
+# Обновляем список пакетов
+apt-get update -y
+
+# Обновляем уже установленные пакеты
+apt-get upgrade -y
+
+# Чистим старые/ненужные зависимости
+apt-get autoremove -y
+apt-get autoclean
+
+# Устанавливаем UFW и разрешаем нужные порты
+apt-get install -y ufw
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp   # SSH
+ufw allow 80/tcp   # HTTP
+ufw allow 443/tcp  # HTTPS
+ufw --force enable
+
+# Устанавливаем fail2ban
+apt-get install -y fail2ban
+
+# Создаём простой локальный конфиг для защиты SSH от брутфорса
+cat > /etc/fail2ban/jail.local <<'EOF'
+[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true
+port    = ssh
+filter  = sshd
+logpath = /var/log/auth.log
+EOF
+
+# Перезапускаем fail2ban, чтобы применить конфигурацию
+systemctl enable fail2ban
+systemctl restart fail2ban
+
+# Настройка пользователя
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 print_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
