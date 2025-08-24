@@ -206,6 +206,7 @@ grep -q "^AllowUsers" /etc/ssh/sshd_config && \
     sed -i "s/^AllowUsers.*/AllowUsers $username/" /etc/ssh/sshd_config || \
     echo "AllowUsers $username" >> /etc/ssh/sshd_config
 
+install -d -m 0755 -o root -g root /run/sshd
 sshd -t || { print_error "Ошибка конфигурации"; exit 1; }
 sudo systemctl daemon-reload
 sudo systemctl restart ssh.socket
