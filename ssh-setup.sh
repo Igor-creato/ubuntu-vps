@@ -161,6 +161,8 @@ grep -q "^AllowUsers" /etc/ssh/sshd_config && \
     echo "AllowUsers $username" >> /etc/ssh/sshd_config
 
 sshd -t || { print_error "Ошибка конфигурации"; exit 1; }
+sudo systemctl daemon-reload
+sudo systemctl restart ssh.socket
 systemctl restart ssh
 
 print_info "SSH перезапущен на порту $new_port"
