@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SSH_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/ssh-setup.sh"
+AUTO_UPDATE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/auto_udate_ubuntu.sh"
 DOCKER_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/docker-install/main/install-docker.sh"
 
 echo "=== Запуск установки SSH ==="
