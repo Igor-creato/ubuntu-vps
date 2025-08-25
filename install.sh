@@ -43,7 +43,7 @@ fi
 
 if [[ "$AUTO_UPDATE" == true ]]; then
     echo "=== Включение автообновлений ==="
-    bash <(curl -fsSL "$AUTO_UPDATE_URLL")
+    bash <(curl -fsSL "$AUTO_UPDATE_URL")
 fi
 
 if [[ "$INSTALL_DOCKER" == true ]]; then
