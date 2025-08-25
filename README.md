@@ -14,3 +14,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/s
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/ssh-setup.sh)
 ```
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/install.sh)
+```
