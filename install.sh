@@ -5,10 +5,42 @@ SSH_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/ss
 AUTO_UPDATE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/auto_udate_ubuntu.sh"
 DOCKER_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/docker-install/main/install-docker.sh"
 
-echo "=== Запуск установки SSH ==="
-bash <(curl -fsSL "$SSH_SCRIPT_URL")
+# парсим аргументы
+INSTALL_SSH=false
+AUTO_UPDATE=false
+INSTALL_DOCKER=false
 
-echo "=== Запуск установки Docker ==="
-bash <(curl -fsSL "$DOCKER_SCRIPT_URL")
+for arg in "$@"; do
+    case "$arg" in
+        --ssh)    INSTALL_SSH=true ;;
+        --update) AUTO_UPDATE=TRUE ;;
+        --docker) INSTALL_DOCKER=true ;;
+        *) echo "Неизвестный флаг: $arg"; exit 1 ;;
+    esac
+done
 
-echo "✅ Все скрипты выполнены успешно"
+# если флагов нет — ставим всё
+if [[ "$#" -eq 0 ]]; then
+    INSTALL_SSH=true
+    AUTO_UPDATE=true
+    INSTALL_DOCKER=true
+fi
+
+# последовательно запускаем
+if [[ "$INSTALL_SSH" == true ]]; then
+    echo "=== Установка SSH ==="
+    bash <(curl -fsSL "$SSH_SCRIPT_URL")
+fi
+
+if [[ "$AUTO_UPDATE" == true ]]; then
+    echo "=== Включение автообновлений ==="
+    bash <(curl -fsSL "$AUTO_UPDATE_URLL")
+fi
+
+if [[ "$INSTALL_DOCKER" == true ]]; then
+    echo "=== Установка Docker ==="
+    bash <(curl -fsSL "$DOCKER_SCRIPT_URL")
+fi
+
+echo "✅ Готово"
+
