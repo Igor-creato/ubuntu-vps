@@ -1,6 +1,6 @@
 #!/bin/bash
 # setup.sh – установка автообновлений + Telegram-уведомлений
-set -e
+set -euo pipefail
 
 # --- функция для отправки сообщения в Telegram ---
 send_tg() {
