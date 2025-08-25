@@ -221,3 +221,13 @@ print_success "\n=== Готово ==="
 print_info "  Порт: $new_port"
 print_info "  Пользователь: $username"
 print_info "  Только по ключу"
+
+echo "=== Установка Docker ==="
+DOCKER_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/docker-install/main/install-docker.sh"
+
+if curl -fsSL "$DOCKER_SCRIPT_URL" | bash; then
+    echo "✅ Docker успешно установлен"
+else
+    echo "❌ Ошибка при установке Docker"
+    exit 1
+fi
