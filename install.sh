@@ -8,6 +8,7 @@ DOCKER_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/docker-install/
 
 # парсим аргументы
 INSTALL_SSH=false
+CHAT_ID=false
 AUTO_UPDATE=false
 INSTALL_DOCKER=false
 
