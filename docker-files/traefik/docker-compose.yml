@@ -3,6 +3,8 @@ services:
     image: traefik:v3.5
     restart: unless-stopped
     env_file: .env                 # подгружаем переменные
+    networks:
+      - traefik-public
     command:
       - "--configFile=/etc/traefik/traefik.yml"
     ports:
