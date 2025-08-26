@@ -19,6 +19,9 @@ if [[ -f "$ENV_FILE" ]]; then
     echo
     read -rp "Использовать текущие данные? [Y/n]: " USE_OLD
     if [[ ! $USE_OLD =~ ^[Nn]$ ]]; then
+        # Подгружаем переменные из .env, чтобы они были доступны дальше
+        # shellcheck source=/dev/null
+        source "$ENV_FILE"
         echo -e "${GREEN}Оставляем текущие данные и перезапускаем…${NC}"
         cd "$BASE_DIR"
         docker compose pull
