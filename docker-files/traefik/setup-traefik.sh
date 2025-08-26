@@ -41,6 +41,8 @@ EOF
 else
     echo -e "${YELLOW}Используем существующие данные из .env${NC}"
 fi
+# создаём внешнюю сеть, если её ещё нет
+docker network create traefik-public 2>/dev/null || true
 
 # ------------------------------------------------------------------
 # 3. Скачиваем/обновляем compose и traefik.yml
