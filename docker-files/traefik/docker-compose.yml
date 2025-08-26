@@ -1,43 +1,30 @@
-# docker-compose.yml
 services:
   traefik:
     image: traefik:v3.5
     restart: unless-stopped
+    env_file: .env                 # подгружаем переменные
     command:
-      # API и дашборд
-      - "--api.dashboard=true"
-      - "--api.insecure=false" # В продакшене используйте пароль
-      # Провайдер Docker
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      # Entrypoints
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      # Redirect HTTP → HTTPS
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      # Let's Encrypt
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-      - "--certificatesresolvers.letsencrypt.acme.email=ppcdolar@gmail.com"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--configFile=/etc/traefik/traefik.yml"
     ports:
       - "80:80"
       - "443:443"
-      - "8080:8080" # Дашборд (закройте в firewall для внешних IP)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik_letsencrypt:/letsencrypt
-      - ./traefik.yml:/etc/traefik/traefik.yml:ro # Опционально: кастомный конфиг
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+    secrets:
+      - traefik_dashboard_users
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.dashboard.rule=Host(`traefik.autmatization-bot.ru`)"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.${TRAEFIK_DOMAIN}`)"
       - "traefik.http.routers.dashboard.service=api@internal"
       - "traefik.http.routers.dashboard.tls.certresolver=letsencrypt"
-      # Базовая аутентификация для дашборда (закомментируйте, если не нужна)
       - "traefik.http.routers.dashboard.middlewares=auth"
-      - "traefik.http.middlewares.auth.basicauth.users=admin:$$2y$$10$$8K1p/kVGKpDH0WJ8XP5M2eULB8dPKF1WGlEXs0H6wONqK4QK8Fq8qu" # admin:password
+      - "traefik.http.middlewares.auth.basicauth.usersfile=/run/secrets/traefik_dashboard_users"
+
+secrets:
+  traefik_dashboard_users:
+    file: ./secrets/dashboard.htpasswd
 
 volumes:
   traefik_letsencrypt:
-    driver: local
