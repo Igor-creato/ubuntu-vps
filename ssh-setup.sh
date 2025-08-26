@@ -11,7 +11,7 @@ set -euo pipefail
 
 # Обновляем список пакетов
 DEBIAN_FRONTEND=noninteractive sudo apt-get update -y
-DEBIAN_FRONTEND=noninteractive sudо apt install -y openssh-server
+DEBIAN_FRONTEND=noninteractive sudo apt install -y openssh-server
 
 # Обновляем уже установленные пакеты
 DEBIAN_FRONTEND=noninteractive sudo apt-get -y upgrade
