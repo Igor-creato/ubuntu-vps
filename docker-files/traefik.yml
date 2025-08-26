@@ -1,0 +1,27 @@
+# traefik.yml — статическая конфигурация
+
+api:
+  insecure: true   # включен дашборд без авторизации (только для тестов!)
+
+providers:
+  docker:
+    exposedByDefault: false
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+
+  websecure:
+    address: ":443"
+
+certificatesResolvers:
+  mytlschallenge:
+    acme:
+      email: "${SSL_EMAIL}"
+      storage: "/letsencrypt/acme.json"
+      tlsChallenge: {}
