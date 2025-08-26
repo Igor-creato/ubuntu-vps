@@ -10,18 +10,18 @@ set -euo pipefail
 # ----------------------------------------------------------
 
 # Обновляем список пакетов
-DEBIAN_FRONTEND=noninteractive sudo apt-get update -y
+DEBIAN_FRONTEND=noninteractive sudo apt update -y
 DEBIAN_FRONTEND=noninteractive sudo apt install -y openssh-server
 
 # Обновляем уже установленные пакеты
-DEBIAN_FRONTEND=noninteractive sudo apt-get -y upgrade
-DEBIAN_FRONTEND=noninteractive sudo apt-get -y full-upgrade || true
+DEBIAN_FRONTEND=noninteractive sudo apt -y upgrade
+DEBIAN_FRONTEND=noninteractive sudo apt -y full-upgrade || true
 
 # Чистим старые/ненужные зависимости
 sudo dpkg --configure -a || true
-DEBIAN_FRONTEND=noninteractive sudo apt-get -f install -y || true
-DEBIAN_FRONTEND=noninteractive sudo apt-get -y autoremove --purge
-DEBIAN_FRONTEND=noninteractive sudo apt-get -y autoclean
+DEBIAN_FRONTEND=noninteractive sudo apt -f install -y || true
+DEBIAN_FRONTEND=noninteractive sudo apt -y autoremove --purge
+DEBIAN_FRONTEND=noninteractive sudo apt -y autoclean
 
 # Устанавливаем UFW и разрешаем нужные порты
 apt-get install -y ufw
