@@ -4,7 +4,8 @@ services:
     restart: unless-stopped
     env_file: .env                 # подгружаем переменные
     networks:
-      - traefik-public
+      - traefik-public:
+        external: true
     command:
       - "--configFile=/etc/traefik/traefik.yml"
     ports:
