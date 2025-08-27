@@ -13,3 +13,6 @@ install traefik
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/traefik/setup-traefik.sh)
 ```
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/traefik/setup-traefik.sh)
+```
