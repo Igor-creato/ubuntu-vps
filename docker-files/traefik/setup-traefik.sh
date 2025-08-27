@@ -104,21 +104,51 @@ fi
 echo -e "${GREEN}Конфигурационные файлы успешно обновлены.${NC}"
 
 # ------------------------------------------------------------------
-# 5. Создаём htpasswd
-if [[ -z "${BASIC_AUTH_PASS:-}" ]]; then
-    echo "Ошибка: BASIC_AUTH_PASS не задан!"
+# ------------------------------------------------------------------
+# 5. Проверка .env и создание/обновление dashboard.htpasswd
+echo -e "${YELLOW}Проверяем конфигурацию для Basic Auth...${NC}"
+
+# Проверяем, что переменные заданы
+if [[ -z "${BASIC_AUTH_USER:-}" ]] || [[ -z "${BASIC_AUTH_PASS:-}" ]]; then
+    echo -e "${RED}Ошибка: BASIC_AUTH_USER или BASIC_AUTH_PASS не заданы в .env${NC}"
     exit 1
 fi
 
-echo -e "${YELLOW}Генерируем htpasswd для дашборда...${NC}"
+HTPASSWD_FILE="$SECRETS_DIR/dashboard.htpasswd"
 
-docker run --rm -v "$SECRETS_DIR:/out" \
-    httpd:alpine \
-    htpasswd -nbB "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASS}" | \
-    sed "s/^/${BASIC_AUTH_USER}:/" > "$SECRETS_DIR/dashboard.htpasswd"
+# Если файл существует — спрашиваем, пересоздать ли
+if [[ -f "$HTPASSWD_FILE" ]]; then
+    echo -e "${YELLOW}Файл $HTPASSWD_FILE уже существует.${NC}"
+    read -rp "Пересоздать его? [y/N]: " RECREATE_HTPASSWD
+    if [[ ! "$RECREATE_HTPASSWD" =~ ^[yY](es|es)?$ ]]; then
+        echo -e "${GREEN}Оставлен существующий файл htpasswd.${NC}"
+    else
+        echo -e "${YELLOW}Создаём новый файл htpasswd...${NC}"
+        docker run --rm -v "$SECRETS_DIR:/out" \
+          httpd:alpine \
+          htpasswd -nbB "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASS}" > "$HTPASSWD_FILE"
+        echo -e "${GREEN}Новый файл $HTPASSWD_FILE успешно создан.${NC}"
+    fi
+else
+    echo -e "${YELLOW}Создаём новый файл $HTPASSWD_FILE...${NC}"
+    docker run --rm -v "$SECRETS_DIR:/out" \
+      httpd:alpine \
+      htpasswd -nbB "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASS}" > "$HTPASSWD_FILE"
+    echo -e "${GREEN}Файл $HTPASSWD_FILE успешно создан.${NC}"
+fi
 
-echo -e "${GREEN}Файл dashboard.htpasswd создан.${NC}"
-
+# Финальная проверка: убедимся, что файл содержит логин и хэш
+if [[ -f "$HTPASSWD_FILE" ]]; then
+    if ! grep -q "^${BASIC_AUTH_USER}:" "$HTPASSWD_FILE"; then
+        echo -e "${RED}Ошибка: Файл $HTPASSWD_FILE не содержит логин ${BASIC_AUTH_USER}!${NC}"
+        echo -e "${RED}Возможно, произошла ошибка при генерации.${NC}"
+        exit 1
+    fi
+else
+    echo -e "${RED}Ошибка: Файл $HTPASSWD_FILE не был создан!${NC}"
+    exit 1
+fi
+chmod 600 "$HTPASSWD_FILE"
 # ------------------------------------------------------------------
 # 6. Запуск / перезапуск Traefik
 cd "$BASE_DIR"
