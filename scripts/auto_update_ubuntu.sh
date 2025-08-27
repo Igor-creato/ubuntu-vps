@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # setup.sh – установка автообновлений + Telegram-уведомлений
 set -euo pipefail
 
