@@ -18,3 +18,6 @@ bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/s
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/install.sh)
 ```
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/traefik/setup-traefik.sh)
+```
