@@ -3,7 +3,7 @@ set -euo pipefail
 
 SSH_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/ssh-setup.sh"
 CHAT_ID_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/chat-id.sh"
-AUTO_UPDATE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/auto_udate_ubuntu.sh"
+AUTO_UPDATE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/auto_update_ubuntu.sh"
 DOCKER_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/install-docker.sh"
 
 # парсим аргументы
