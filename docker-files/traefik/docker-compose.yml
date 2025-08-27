@@ -2,25 +2,55 @@ services:
   traefik:
     image: traefik:v3.5
     restart: unless-stopped
-    env_file: .env                 # подгружаем переменные
+    env_file: .env
+    # Передаём переменные внутрь контейнера (важно для ACME_EMAIL)
+    environment:
+      - ACME_EMAIL=${ACME_EMAIL}
     networks:
       - traefik-public
-    command:
-      - "--configFile=/etc/traefik/traefik.yml"
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik_letsencrypt:/letsencrypt
-      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      # Можно оставить traefik.yml для удобства, но он не обязателен
+      # - ./traefik.yml:/etc/traefik/traefik.yml:ro
     secrets:
       - traefik_dashboard_users
+    # Вместо внешнего traefik.yml — используем конфигурацию напрямую
+    command:
+      # Включаем Docker как провайдер
+      - "--providers.docker=true"
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock"
+      - "--providers.docker.exposedByDefault=false"
+      
+      # Точки входа
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+
+      # Включаем API и дашборд
+      - "--api.dashboard=true"
+      - "--api.insecure=false"  # аутентификация через middleware
+
+      # Настройка Let's Encrypt
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+
     labels:
+      # Включаем Traefik для самого себя
       - "traefik.enable=true"
+      # Маршрут: Host равен значению TRAEFIK_DOMAIN из .env
       - "traefik.http.routers.dashboard.rule=Host(`${TRAEFIK_DOMAIN}`)"
       - "traefik.http.routers.dashboard.service=api@internal"
+      # Используем HTTPS и certresolver
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls=true"
       - "traefik.http.routers.dashboard.tls.certresolver=letsencrypt"
+      # Middleware: Basic Auth
       - "traefik.http.routers.dashboard.middlewares=auth"
       - "traefik.http.middlewares.auth.basicauth.usersfile=/run/secrets/traefik_dashboard_users"
 
