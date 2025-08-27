@@ -35,7 +35,7 @@ if [[ -z "${ACME_EMAIL:-}" ]] || [[ -z "${TRAEFIK_DOMAIN:-}" ]]; then
     echo -e "${YELLOW}Заполняем/обновляем конфигурацию.${NC}"
 
     read -rp "E-mail для Let's Encrypt: " ACME_EMAIL_INPUT
-    read -rp "Основной домен (например, autmatization-bot.ru): " BASE_DOMAIN_INPUT
+    read -rp "Основной домен (например, example.com): " BASE_DOMAIN_INPUT
 
     # Проверка ввода
     while [[ -z "$ACME_EMAIL_INPUT" ]]; do
@@ -45,7 +45,7 @@ if [[ -z "${ACME_EMAIL:-}" ]] || [[ -z "${TRAEFIK_DOMAIN:-}" ]]; then
 
     while [[ -z "$BASE_DOMAIN_INPUT" ]]; do
         echo -e "${YELLOW}Домен обязателен!${NC}"
-        read -rp "Основной домен (например, autmatization-bot.ru): " BASE_DOMAIN_INPUT
+        read -rp "Основной домен (например, example.com): " BASE_DOMAIN_INPUT
     done
 
     # Основной домен (введённый пользователем)
@@ -88,7 +88,7 @@ fi
 # 3. Создаём внешнюю сеть, если её нет
 if ! docker network inspect traefik-public >/dev/null 2>&1; then
     echo -e "${YELLOW}Создаём сеть traefik-public...${NC}"
-    docker network create traefik-public
+    docker network create proxy
 else
     echo -e "${GREEN}Сеть traefik-public уже существует.${NC}"
 fi
