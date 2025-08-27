@@ -7,7 +7,7 @@ services:
     environment:
       - ACME_EMAIL=${ACME_EMAIL}
     networks:
-      - traefik-public
+      - proxy
     ports:
       - "80:80"
       - "443:443"
@@ -62,5 +62,5 @@ volumes:
   traefik_letsencrypt:
 
 networks:
-  traefik-public:
+  proxy:
     external: true
