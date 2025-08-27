@@ -1,10 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-SSH_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/ssh-setup.sh"
-CHAT_ID_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/chat-id.sh"
-AUTO_UPDATE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/auto_udate_ubuntu.sh"
-DOCKER_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/docker-install/main/install-docker.sh"
+SSH_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/ssh-setup.sh"
+CHAT_ID_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/chat-id.sh"
+AUTO_UPDATE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/auto_udate_ubuntu.sh"
+DOCKER_SCRIPT_URL="https://raw.githubusercontent.com/Igor-creato/docker-install/main/scripts/install-docker.sh"
 
 # парсим аргументы
 INSTALL_SSH=false
