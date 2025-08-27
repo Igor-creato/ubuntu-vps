@@ -5,14 +5,14 @@ IFS=$'\n\t'
 
 # Константы и конфигурация
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="2.0"
+readonly SCRIPT_VERSION="2.1"
 readonly BASE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts"
 readonly LOG_FILE="/tmp/ubuntu-setup-$(date +%Y%m%d-%H%M%S).log"
 
-# URL скриптов (исправлена опечатка)
+# URL скриптов
 readonly SSH_SCRIPT_URL="${BASE_URL}/ssh-setup.sh"
 readonly CHAT_ID_URL="${BASE_URL}/chat-id.sh"
-readonly AUTO_UPDATE_URL="${BASE_URL}/auto_update_ubuntu.sh"  # Исправлена опечатка
+readonly AUTO_UPDATE_URL="${BASE_URL}/auto_update_ubuntu.sh"
 readonly DOCKER_SCRIPT_URL="${BASE_URL}/install-docker.sh"
 
 # Цвета для вывода
@@ -22,303 +22,251 @@ readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly NC='\033[0m' # No Color
 
-# Функция логирования
+# Логирование
 log() {
-    local level="$1"
-    shift
-    local message="$*"
-    local timestamp
-    timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
-    
-    case "$level" in
-        "INFO")  echo -e "${BLUE}[INFO]${NC}  $message" | tee -a "$LOG_FILE" ;;
-        "WARN")  echo -e "${YELLOW}[WARN]${NC}  $message" | tee -a "$LOG_FILE" ;;
-        "ERROR") echo -e "${RED}[ERROR]${NC} $message" | tee -a "$LOG_FILE" ;;
-        "SUCCESS") echo -e "${GREEN}[SUCCESS]${NC} $message" | tee -a "$LOG_FILE" ;;
-    esac
-    
-    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+  local level="$1"; shift
+  local message="$*"
+  local timestamp
+  timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+
+  case "$level" in
+    INFO)    echo -e "${BLUE}[INFO]${NC}    $message" | tee -a "$LOG_FILE" ;;
+    WARN)    echo -e "${YELLOW}[WARN]${NC}    $message" | tee -a "$LOG_FILE" ;;
+    ERROR)   echo -e "${RED}[ERROR]${NC}   $message" | tee -a "$LOG_FILE" ;;
+    SUCCESS) echo -e "${GREEN}[SUCCESS]${NC} $message" | tee -a "$LOG_FILE" ;;
+    *)       echo "[${level}] $message" | tee -a "$LOG_FILE" ;;
+  esac
+
+  echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
 }
 
-# Функция проверки зависимостей
+# Проверка зависимостей
 check_dependencies() {
-    local deps=("curl" "bash")
-    local missing_deps=()
-    
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" >/dev/null 2>&1; then
-            missing_deps+=("$dep")
-        fi
-    done
-    
-    if [[ ${#missing_deps[@]} -gt 0 ]]; then
-        log "ERROR" "Отсутствуют необходимые зависимости: ${missing_deps[*]}"
-        log "INFO" "Установите их командой: sudo apt update && sudo apt install -y ${missing_deps[*]}"
-        exit 1
-    fi
+  local deps=("curl" "bash" "sha256sum" "wc" "head")
+  local missing=()
+  for dep in "${deps[@]}"; do
+    command -v "$dep" >/dev/null 2>&1 || missing+=("$dep")
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    log "ERROR" "Отсутствуют зависимости: ${missing[*]}"
+    log "INFO"  "Установка: apt-get update && apt-get install -y ${missing[*]}"
+    exit 1
+  fi
 }
 
-# Функция проверки прав root
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        log "WARN" "Некоторые операции требуют root привилегий"
-        log "INFO" "Рекомендуется запустить скрипт с sudo"
-        read -p "Продолжить без root? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log "INFO" "Выход по запросу пользователя"
-            exit 0
-        fi
-    fi
+# Требуем root
+require_root() {
+  if [[ $EUID -ne 0 ]]; then
+    log "ERROR" "Нужны права root. Запустите: sudo $SCRIPT_NAME ..."
+    exit 1
+  fi
 }
 
-# Функция проверки доступности URL
+# Проверка системы и сети
+check_system_compatibility() {
+  if [[ ! -f /etc/os-release ]] || ! grep -qi ubuntu /etc/os-release; then
+    log "WARN" "Обнаружена не Ubuntu. Скрипт рассчитан на Ubuntu."
+  fi
+
+  if [[ -f /etc/os-release ]]; then
+    local ubuntu_version
+    ubuntu_version=$(grep VERSION_ID /etc/os-release | cut -d'"' -f2 || true)
+    [[ -n "${ubuntu_version:-}" ]] && log "INFO" "Версия Ubuntu: $ubuntu_version"
+  fi
+
+  # Проверка доступа в интернет без ICMP: HEAD-запрос
+  if ! curl -I -s --max-time 10 https://deb.debian.org >/dev/null; then
+    log "ERROR" "Нет сетевого доступа (HTTPS недоступен)."
+    exit 1
+  fi
+}
+
+# Проверка доступности URL
 check_url() {
-    local url="$1"
-    local timeout=10
-    
-    if curl --silent --fail --head --max-time "$timeout" "$url" >/dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
+  local url="$1"
+  curl --silent --fail --head --max-time 10 "$url" >/dev/null 2>&1
 }
 
-# Функция безопасного выполнения удаленного скрипта
+# Безопасное исполнение удалённого скрипта
 safe_execute_remote_script() {
-    local url="$1"
-    local description="$2"
-    local temp_script
-    
-    log "INFO" "Выполнение: $description"
-    log "INFO" "URL: $url"
-    
-    # Проверяем доступность URL
-    if ! check_url "$url"; then
-        log "ERROR" "URL недоступен: $url"
-        return 1
-    fi
-    
-    # Создаем временный файл
-    temp_script=$(mktemp)
-    trap "rm -f '$temp_script'" EXIT
-    
-    # Скачиваем скрипт
-    if ! curl -fsSL --max-time 30 "$url" -o "$temp_script"; then
-        log "ERROR" "Не удалось скачать скрипт: $url"
-        return 1
-    fi
-    
-    # Проверяем, что файл не пустой и является bash скриптом
-    if [[ ! -s "$temp_script" ]]; then
-        log "ERROR" "Скачанный файл пустой: $url"
-        return 1
-    fi
-    
-    if ! head -n1 "$temp_script" | grep -q "^#!/bin/bash"; then
-        log "WARN" "Файл может не быть bash скриптом: $url"
-        log "INFO" "Первая строка: $(head -n1 "$temp_script")"
-    fi
-    
-    # Показываем пользователю информацию о скрипте
-    log "INFO" "Размер скрипта: $(wc -c < "$temp_script") байт"
-    log "INFO" "Контрольная сумма (SHA256): $(sha256sum "$temp_script" | cut -d' ' -f1)"
-    
-    # Запрашиваем подтверждение
-    read -p "Выполнить скрипт '$description'? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log "INFO" "Пропуск выполнения: $description"
-        return 0
-    fi
-    
-    # Выполняем скрипт
-    if bash "$temp_script"; then
-        log "SUCCESS" "Успешно выполнено: $description"
-        return 0
-    else
-        local exit_code=$?
-        log "ERROR" "Ошибка выполнения: $description (код: $exit_code)"
-        return $exit_code
-    fi
+  local url="$1"
+  local description="$2"
+  local temp_script
+
+  log "INFO" "Выполнение: $description"
+  log "INFO" "URL: $url"
+
+  if ! check_url "$url"; then
+    log "ERROR" "URL недоступен: $url"
+    return 1
+  fi
+
+  temp_script="$(mktemp)"
+  # Очистка временного файла при любом выходе из функции/скрипта
+  trap '[[ -f "'"$temp_script"'" ]] && rm -f "'"$temp_script"'" || true' RETURN
+
+  if ! curl -fsSL --max-time 60 "$url" -o "$temp_script"; then
+    log "ERROR" "Не удалось скачать: $url"
+    return 1
+  fi
+
+  if [[ ! -s "$temp_script" ]]; then
+    log "ERROR" "Скачанный файл пуст: $url"
+    return 1
+  fi
+
+  local first_line
+  first_line="$(head -n1 "$temp_script" || true)"
+  if ! grep -Eq '^#!(/usr/bin/env[[:space:]]+bash|/bin/bash)$' <<<"$first_line"; then
+    log "WARN" "Не найден ожидаемый shebang bash."
+    log "INFO" "Первая строка: $first_line"
+  fi
+
+  log "INFO" "Размер скрипта: $(wc -c < "$temp_script") байт"
+  log "INFO" "SHA256: $(sha256sum "$temp_script" | cut -d' ' -f1)"
+
+  read -p "Выполнить '$description'? (y/N): " -n 1 -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    log "INFO" "Пропуск: $description"
+    return 0
+  fi
+
+  if bash "$temp_script"; then
+    log "SUCCESS" "Успешно: $description"
+    return 0
+  else
+    local code=$?
+    log "ERROR" "Ошибка выполнения: $description (код: $code)"
+    return $code
+  fi
 }
 
-# Функция отображения справки
+# Справка
 show_help() {
-    cat << EOF
+  cat << EOF
 $SCRIPT_NAME v$SCRIPT_VERSION
 
-Скрипт автоматической настройки Ubuntu VPS сервера
+Оркестратор первичной настройки Ubuntu VPS
 
 ИСПОЛЬЗОВАНИЕ:
-    $SCRIPT_NAME [ОПЦИИ]
+  $SCRIPT_NAME [ОПЦИИ]
 
 ОПЦИИ:
-    --ssh        Установка и настройка SSH
-    --chat       Получение Telegram Chat ID
-    --update     Настройка автоматических обновлений
-    --docker     Установка Docker
-    --help, -h   Показать эту справку
-    --version    Показать версию
+  --ssh        Установка и настройка SSH
+  --chat       Получение Telegram Chat ID
+  --update     Настройка автоматических обновлений
+  --docker     Установка Docker
+  --help, -h   Показать справку
+  --version    Показать версию
 
 ПРИМЕРЫ:
-    $SCRIPT_NAME                    # Установить все компоненты
-    $SCRIPT_NAME --ssh --docker     # Установить только SSH и Docker
-    $SCRIPT_NAME --help             # Показать справку
-
-ФАЙЛЫ:
-    Логи сохраняются в: $LOG_FILE
-
+  $SCRIPT_NAME                  # Выполнить всё (в правильном порядке)
+  $SCRIPT_NAME --ssh --docker   # Обновление системы + SSH, затем Docker
 EOF
 }
 
-# Функция проверки совместимости системы
-check_system_compatibility() {
-    # Проверяем, что это Ubuntu
-    if [[ ! -f /etc/os-release ]] || ! grep -q "ubuntu" /etc/os-release; then
-        log "WARN" "Скрипт предназначен для Ubuntu, но обнаружена другая система"
-    fi
-    
-    # Проверяем версию Ubuntu
-    if [[ -f /etc/os-release ]]; then
-        local ubuntu_version
-        ubuntu_version=$(grep VERSION_ID /etc/os-release | cut -d'"' -f2)
-        log "INFO" "Версия Ubuntu: $ubuntu_version"
-        
-        # Предупреждаем о старых версиях
-        case "$ubuntu_version" in
-            "18.04"|"16.04"|"14.04")
-                log "WARN" "Обнаружена устаревшая версия Ubuntu ($ubuntu_version)"
-                log "WARN" "Рекомендуется обновление до более новой версии"
-                ;;
-        esac
-    fi
-    
-    # Проверяем доступность интернета
-    if ! ping -c 1 -W 5 8.8.8.8 >/dev/null 2>&1; then
-        log "ERROR" "Отсутствует подключение к интернету"
-        exit 1
-    fi
+# Шаг 1 — обновление системы (всегда)
+system_update() {
+  log "INFO" "Обновление списка пакетов и установленного ПО..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get -y dist-upgrade
+  apt-get -y autoremove --purge
+  apt-get -y autoclean
+
+  if [[ -f /var/run/reboot-required ]]; then
+    log "WARN" "Система требует перезагрузки после обновления."
+  fi
 }
 
-# Основная функция
 main() {
-    # Инициализация
-    log "INFO" "Запуск $SCRIPT_NAME v$SCRIPT_VERSION"
-    log "INFO" "Логи записываются в: $LOG_FILE"
-    
-    # Проверки системы
-    check_system_compatibility
-    check_dependencies
-    check_root
-    
-    # Парсинг аргументов
-    local install_ssh=false
-    local chat_id=false
-    local auto_update=false
-    local install_docker=false
-    
-    # Если аргументов нет - устанавливаем всё
-    if [[ $# -eq 0 ]]; then
-        install_ssh=true
-        chat_id=true
-        auto_update=true
-        install_docker=true
-        log "INFO" "Аргументы не указаны - будут установлены все компоненты"
-    else
-        # Парсим аргументы
-        while [[ $# -gt 0 ]]; do
-            case "$1" in
-                --ssh)
-                    install_ssh=true
-                    shift
-                    ;;
-                --chat)
-                    chat_id=true
-                    shift
-                    ;;
-                --update)
-                    auto_update=true
-                    shift
-                    ;;
-                --docker)
-                    install_docker=true
-                    shift
-                    ;;
-                --help|-h)
-                    show_help
-                    exit 0
-                    ;;
-                --version)
-                    echo "$SCRIPT_NAME v$SCRIPT_VERSION"
-                    exit 0
-                    ;;
-                *)
-                    log "ERROR" "Неизвестная опция: $1"
-                    log "INFO" "Используйте --help для справки"
-                    exit 1
-                    ;;
-            esac
-        done
-    fi
-    
-    # Показываем план выполнения
-    log "INFO" "План выполнения:"
-    [[ "$install_ssh" == true ]] && log "INFO" "  ✓ Установка SSH"
-    [[ "$chat_id" == true ]] && log "INFO" "  ✓ Получение Chat ID"
-    [[ "$auto_update" == true ]] && log "INFO" "  ✓ Настройка автообновлений"
-    [[ "$install_docker" == true ]] && log "INFO" "  ✓ Установка Docker"
-    
-    echo
-    read -p "Продолжить? (Y/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        log "INFO" "Выход по запросу пользователя"
-        exit 0
-    fi
-    
-    # Счетчик ошибок
-    local error_count=0
-    
-    # Последовательное выполнение
-    if [[ "$install_ssh" == true ]]; then
-        if ! safe_execute_remote_script "$SSH_SCRIPT_URL" "Установка и настройка SSH"; then
-            ((error_count++))
-        fi
-    fi
-    
-    if [[ "$chat_id" == true ]]; then
-        if ! safe_execute_remote_script "$CHAT_ID_URL" "Получение Telegram Chat ID"; then
-            ((error_count++))
-        fi
-    fi
-    
-    if [[ "$auto_update" == true ]]; then
-        if ! safe_execute_remote_script "$AUTO_UPDATE_URL" "Настройка автоматических обновлений"; then
-            ((error_count++))
-        fi
-    fi
-    
-    if [[ "$install_docker" == true ]]; then
-        if ! safe_execute_remote_script "$DOCKER_SCRIPT_URL" "Установка Docker"; then
-            ((error_count++))
-        fi
-    fi
-    
-    # Итоговый отчет
-    echo
-    if [[ $error_count -eq 0 ]]; then
-        log "SUCCESS" "Все операции выполнены успешно! ✅"
-    else
-        log "WARN" "Завершено с ошибками: $error_count"
-        log "INFO" "Проверьте лог: $LOG_FILE"
-    fi
-    
-    log "INFO" "Рекомендуется перезагрузить систему: sudo reboot"
+  log "INFO" "Запуск $SCRIPT_NAME v$SCRIPT_VERSION"
+  log "INFO" "Логи: $LOG_FILE"
+
+  require_root
+  check_dependencies
+  check_system_compatibility
+
+  # Парсинг опций
+  local install_ssh=false
+  local get_chat_id=false
+  local setup_auto_update=false
+  local install_docker=false
+
+  if [[ $# -eq 0 ]]; then
+    install_ssh=true
+    get_chat_id=true
+    setup_auto_update=true
+    install_docker=true
+    log "INFO" "Опции не заданы — будут выполнены все шаги."
+  else
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --ssh)    install_ssh=true ;;
+        --chat)   get_chat_id=true ;;
+        --update) setup_auto_update=true ;;
+        --docker) install_docker=true ;;
+        --help|-h) show_help; exit 0 ;;
+        --version) echo "$SCRIPT_NAME v$SCRIPT_VERSION"; exit 0 ;;
+        *) log "ERROR" "Неизвестная опция: $1"; exit 1 ;;
+      esac
+      shift
+    done
+  fi
+
+  # Всегда выполняем обновление первым шагом
+  log "INFO" "План выполнения (фиксированный порядок):"
+  log "INFO" "  1) Обновление системы (обязательно)"
+  [[ "$install_ssh" == true       ]] && log "INFO" "  2) Настройка SSH"
+  [[ "$get_chat_id" == true       ]] && log "INFO" "  3) Получение Chat ID"
+  [[ "$setup_auto_update" == true ]] && log "INFO" "  4) Настройка автообновлений"
+  [[ "$install_docker" == true    ]] && log "INFO" "  5) Установка Docker"
+
+  echo
+  read -p "Продолжить? (Y/n): " -n 1 -r
+  echo
+  if [[ $REPLY =~ ^[Nn]$ ]]; then
+    log "INFO" "Выход по запросу пользователя."
+    exit 0
+  fi
+
+  local errors=0
+
+  # 1) Обновление системы
+  system_update || { log "ERROR" "Сбой обновления системы"; exit 1; }
+
+  # 2) SSH
+  if [[ "$install_ssh" == true ]]; then
+    safe_execute_remote_script "$SSH_SCRIPT_URL" "Установка и настройка SSH" || ((errors++))
+  fi
+
+  # 3) Chat ID
+  if [[ "$get_chat_id" == true ]]; then
+    safe_execute_remote_script "$CHAT_ID_URL" "Получение Telegram Chat ID" || ((errors++))
+  fi
+
+  # 4) Автообновления
+  if [[ "$setup_auto_update" == true ]]; then
+    safe_execute_remote_script "$AUTO_UPDATE_URL" "Настройка автоматических обновлений" || ((errors++))
+  fi
+
+  # 5) Docker (опционально и в конце)
+  if [[ "$install_docker" == true ]]; then
+    safe_execute_remote_script "$DOCKER_SCRIPT_URL" "Установка Docker" || ((errors++))
+  fi
+
+  echo
+  if [[ $errors -eq 0 ]]; then
+    log "SUCCESS" "Все операции выполнены успешно! ✅"
+  else
+    log "WARN" "Завершено с ошибками: $errors. Проверьте лог: $LOG_FILE"
+  fi
+
+  if [[ -f /var/run/reboot-required ]]; then
+    log "INFO" "Рекомендуется перезагрузка: sudo reboot"
+  fi
 }
 
-# Обработка сигналов
 trap 'log "ERROR" "Скрипт прерван сигналом"; exit 130' INT TERM
-
-# Запуск основной функции
 main "$@"
