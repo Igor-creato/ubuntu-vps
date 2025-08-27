@@ -5,7 +5,7 @@ IFS=$'\n\t'
 
 # Константы и конфигурация
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="2.2"   # <<< повышена версия
+readonly SCRIPT_VERSION="2.2.1"   # фикс синтаксиса + мелкие правки
 readonly BASE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts"
 readonly LOG_FILE="/tmp/ubuntu-setup-$(date +%Y%m%d-%H%M%S).log"
 
@@ -22,9 +22,9 @@ readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly NC='\033[0m' # No Color
 
-# --- Параметры, которые нужны ssh-setup.sh ---  # <<<
-USERNAME="${USERNAME-}"   # можно задать через окружение USERNAME
-SSH_PORT="${SSH_PORT-}"   # можно задать через окружение SSH_PORT
+# Параметры для ssh-setup.sh (можно прокинуть окружением)
+USERNAME="${USERNAME-}"
+SSH_PORT="${SSH_PORT-}"
 
 # Логирование
 log() {
@@ -58,12 +58,12 @@ check_dependencies() {
   fi
 }
 
-# Требуем root
+# Требуем root (исправлено fi)
 require_root() {
   if [[ $EUID -ne 0 ]]; then
     log "ERROR" "Нужны права root. Запустите: sudo $SCRIPT_NAME ..."
     exit 1
-  }
+  fi
 }
 
 # Проверка системы и сети
@@ -91,8 +91,7 @@ check_url() {
   curl --silent --fail --head --max-time 10 "$url" >/dev/null 2>&1
 }
 
-# Безопасное исполнение удалённого скрипта
-# Теперь поддерживает передачу аргументов подскрипту: safe_execute_remote_script URL "desc" -- arg1 arg2 ...  # <<<
+# Безопасное исполнение удалённого скрипта (с поддержкой аргументов)
 safe_execute_remote_script() {
   local url="$1"; shift
   local description="$1"; shift
@@ -130,7 +129,6 @@ safe_execute_remote_script() {
   log "INFO" "Размер скрипта: $(wc -c < "$temp_script") байт"
   log "INFO" "SHA256: $(sha256sum "$temp_script" | cut -d' ' -f1)"
 
-  # Показать, какие аргументы пойдут в подскрипт  # <<<
   if [[ $# -gt 0 ]]; then
     log "INFO" "Параметры подскрипта: $*"
   fi
@@ -142,8 +140,7 @@ safe_execute_remote_script() {
     return 0
   fi
 
-  # ВАЖНО: экспортируем совместимые переменные окружения для старых подскриптов  # <<<
-  # Если подскрипт ожидает переменную `user`, она будет задана.
+  # Экспорт совместимых переменных окружения (на случай, если подскрипт обращается к $user)
   if [[ -n "${USERNAME:-}" ]]; then
     export USERNAME
     export user="$USERNAME"
@@ -152,7 +149,6 @@ safe_execute_remote_script() {
     export SSH_PORT
   fi
 
-  # Запуск с аргументами (если переданы)
   if bash "$temp_script" "$@"; then
     log "SUCCESS" "Успешно: $description"
     return 0
@@ -178,17 +174,16 @@ $SCRIPT_NAME v$SCRIPT_VERSION
   --chat                Получение Telegram Chat ID
   --update              Настройка автоматических обновлений
   --docker              Установка Docker
-
-  --username NAME       Имя пользователя для ssh-setup.sh  (альтернатива: переменная окружения USERNAME)   # <<<
-  --ssh-port PORT       Порт SSH для ssh-setup.sh           (альтернатива: переменная окружения SSH_PORT)  # <<<
+  --username NAME       Имя пользователя для ssh-setup.sh  (альтернатива: переменная окружения USERNAME)
+  --ssh-port PORT       Порт SSH для ssh-setup.sh          (альтернатива: переменная окружения SSH_PORT)
   --help, -h            Показать справку
   --version             Показать версию
 
 ПРИМЕРЫ:
-  $SCRIPT_NAME                            # Выполнить всё (в правильном порядке)
-  $SCRIPT_NAME --ssh --docker             # Обновление системы + SSH, затем Docker
-  $SCRIPT_NAME --ssh --username igor --ssh-port 55555       # <<<
-  USERNAME=admin SSH_PORT=2222 $SCRIPT_NAME --ssh            # <<<
+  $SCRIPT_NAME
+  $SCRIPT_NAME --ssh --docker
+  $SCRIPT_NAME --ssh --username igor --ssh-port 55555
+  USERNAME=admin SSH_PORT=2222 $SCRIPT_NAME --ssh
 EOF
 }
 
@@ -206,7 +201,7 @@ system_update() {
   fi
 }
 
-# --- парсинг опций, включая --username/--ssh-port ---  # <<<
+# Парсинг опций
 parse_args() {
   local -n _install_ssh=$1
   local -n _get_chat_id=$2
@@ -242,7 +237,6 @@ parse_args() {
   done
 }
 
-# --- валидация USERNAME/SSH_PORT (мягкая) ---  # <<<
 validate_inputs() {
   if [[ -n "${USERNAME:-}" ]]; then
     if ! [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
@@ -274,7 +268,7 @@ main() {
   parse_args install_ssh get_chat_id setup_auto_update install_docker "$@"
   validate_inputs
 
-  # План выполнения (фиксированный порядок)
+  # План выполнения
   log "INFO" "План выполнения:"
   log "INFO" "  1) Обновление системы (обязательно)"
   [[ "$install_ssh" == true       ]] && log "INFO" "  2) Настройка SSH"
@@ -295,16 +289,15 @@ main() {
   # 1) Обновление системы
   system_update || { log "ERROR" "Сбой обновления системы"; exit 1; }
 
-  # 2) SSH — формируем аргументы для подскрипта    # <<<
+  # 2) SSH — формируем аргументы для подскрипта
   if [[ "$install_ssh" == true ]]; then
-    args=()
+    local -a args=()
     if [[ -n "${USERNAME:-}" ]]; then
       args+=( --user "$USERNAME" )
     fi
     if [[ -n "${SSH_PORT:-}" ]]; then
       args+=( --port "$SSH_PORT" )
     fi
-    # ВАЖНО: даже если args пуст, мы всё равно экспортируем окружение внутри safe_execute_remote_script
     safe_execute_remote_script "$SSH_SCRIPT_URL" "Установка и настройка SSH" "${args[@]}" || ((errors++))
   fi
 
