@@ -32,34 +32,39 @@ fi
 # ------------------------------------------------------------------
 # 2. Если переменные не заданы — запрашиваем у пользователя
 if [[ -z "${ACME_EMAIL:-}" ]] || [[ -z "${TRAEFIK_DOMAIN:-}" ]]; then
-    echo -e "${YELLOW}Заполняем обязательные параметры.${NC}"
+    echo -e "${YELLOW}Заполняем/обновляем конфигурацию.${NC}"
 
-    # Запрашиваем email с проверкой
     read -rp "E-mail для Let's Encrypt: " ACME_EMAIL_INPUT
-    while [[ -z "${ACME_EMAIL_INPUT:-}" ]] && [[ -z "${ACME_EMAIL:-}" ]]; do
-        echo -e "${YELLOW}E-mail обязателен для получения сертификатов!${NC}"
+    read -rp "Основной домен (например, autmatization-bot.ru): " BASE_DOMAIN_INPUT
+
+    # Проверка ввода
+    while [[ -z "$ACME_EMAIL_INPUT" ]]; do
+        echo -e "${YELLOW}E-mail обязателен!${NC}"
         read -rp "E-mail для Let's Encrypt: " ACME_EMAIL_INPUT
     done
 
-    # Запрашиваем домен с проверкой
-    read -rp "Домен для дашборда Traefik: " TRAEFIK_DOMAIN_INPUT
-    while [[ -z "${TRAEFIK_DOMAIN_INPUT:-}" ]] && [[ -z "${TRAEFIK_DOMAIN:-}" ]]; do
+    while [[ -z "$BASE_DOMAIN_INPUT" ]]; do
         echo -e "${YELLOW}Домен обязателен!${NC}"
-        read -rp "Домен для дашборда Traefik: " TRAEFIK_DOMAIN_INPUT
+        read -rp "Основной домен (например, autmatization-bot.ru): " BASE_DOMAIN_INPUT
     done
 
-    # Применяем значения: приоритет — введённые, иначе старые
-    ACME_EMAIL="${ACME_EMAIL_INPUT:-$ACME_EMAIL}"
-    TRAEFIK_DOMAIN="${TRAEFIK_DOMAIN_INPUT:-$TRAEFIK_DOMAIN}"
+    # Основной домен (введённый пользователем)
+    BASE_DOMAIN="${BASE_DOMAIN_INPUT}"
+    # Поддомен для Traefik
+    TRAEFIK_DOMAIN="traefik.${BASE_DOMAIN}"
+
+    # Используем введённые значения
+    ACME_EMAIL="${ACME_EMAIL_INPUT}"
 
     # Генерируем учётные данные
     BASIC_AUTH_USER="admin"
     BASIC_AUTH_PASS=$(openssl rand -base64 16)
     echo -e "${GREEN}Сгенерированный пароль для ${BASIC_AUTH_USER}: ${BASIC_AUTH_PASS}${NC}"
 
-    # Записываем .env (heredoc с поддержкой отступов через <<-EOF)
+    # Перезаписываем .env
     cat > "$ENV_FILE" <<-EOF
 ACME_EMAIL=$ACME_EMAIL
+BASE_DOMAIN=$BASE_DOMAIN
 TRAEFIK_DOMAIN=$TRAEFIK_DOMAIN
 BASIC_AUTH_USER=$BASIC_AUTH_USER
 BASIC_AUTH_PASS=$BASIC_AUTH_PASS
@@ -67,12 +72,16 @@ EOF
 
     echo -e "${GREEN}.env файл успешно создан.${NC}"
 else
-    # Убедимся, что BASIC_AUTH_PASS существует
-    if [[ -z "${BASIC_AUTH_USER:-}" ]] || [[ -z "${BASIC_AUTH_PASS:-}" ]]; then
-        echo "Ошибка: BASIC_AUTH_USER или BASIC_AUTH_PASS отсутствуют в .env"
-        exit 1
-    fi
     echo -e "${YELLOW}Используем существующие данные из .env${NC}"
+    # Убедимся, что TRAEFIK_DOMAIN и BASE_DOMAIN заданы
+    if [[ -z "${BASE_DOMAIN:-}" ]] && [[ -n "${TRAEFIK_DOMAIN:-}" ]]; then
+        # Попробуем извлечь BASE_DOMAIN из TRAEFIK_DOMAIN
+        if [[ "$TRAEFIK_DOMAIN" == traefik.* ]]; then
+            BASE_DOMAIN="${TRAEFIK_DOMAIN#traefik.}"
+            sed -i "s|^BASE_DOMAIN=.*|BASE_DOMAIN=$BASE_DOMAIN|" "$ENV_FILE"
+            echo -e "${YELLOW}Восстановлен BASE_DOMAIN=$BASE_DOMAIN из TRAEFIK_DOMAIN${NC}"
+        fi
+    fi
 fi
 
 # ------------------------------------------------------------------
@@ -103,7 +112,6 @@ fi
 
 echo -e "${GREEN}Конфигурационные файлы успешно обновлены.${NC}"
 
-# ------------------------------------------------------------------
 # ------------------------------------------------------------------
 # 5. Проверка .env и создание/обновление dashboard.htpasswd
 echo -e "${YELLOW}Проверяем конфигурацию для Basic Auth...${NC}"
