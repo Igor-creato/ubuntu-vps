@@ -96,17 +96,11 @@ fi
 # ------------------------------------------------------------------
 # 4. Скачиваем/обновляем конфигурационные файлы
 COMPOSE_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/traefik/docker-compose.yml"
-TRAEFIK_YML_URL="https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/traefik/traefik.yml"
 
 echo -e "${YELLOW}Скачиваем конфигурационные файлы...${NC}"
 
 if ! curl -sSL --fail "$COMPOSE_URL" -o "$BASE_DIR/docker-compose.yml"; then
     echo -e "${YELLOW}Ошибка: Не удалось скачать docker-compose.yml${NC}"
-    exit 1
-fi
-
-if ! curl -sSL --fail "$TRAEFIK_YML_URL" -o "$BASE_DIR/traefik.yml"; then
-    echo -e "${YELLOW}Ошибка: Не удалось скачать traefik.yml${NC}"
     exit 1
 fi
 
