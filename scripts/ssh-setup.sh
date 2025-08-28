@@ -136,75 +136,73 @@ fi
 # Ключи SSH
 # ----------------------------
 setup_ssh_keys() {
-  local user="$1" home_dir="/home/$user"
+  local user="$1"
+  local home_dir
+  home_dir="$(getent passwd "$user" | cut -d: -f6)"
 
+  # ~/.ssh и authorized_keys с корректными правами
   install -d -m 700 -o "$user" -g "$user" "$home_dir/.ssh"
-  touch "$home_dir/.ssh/authorized_keys"
+  : > "$home_dir/.ssh/authorized_keys"
   chown "$user:$user" "$home_dir/.ssh/authorized_keys"
   chmod 600 "$home_dir/.ssh/authorized_keys"
 
-  local pubkey=""
-  if [[ -n "$KEY_FILE" ]]; then
-    if [[ -f "$KEY_FILE" ]]; then
-      pubkey="$(cat "$KEY_FILE")"
-    else
-      print_err "Файл ключа не найден: $KEY_FILE"
-      exit 1
-    fi
-  else
-    # СНАЧАЛА authorized_keys root, потом .pub — берем весь файл
-    for f in /root/.ssh/authorized_keys /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
-      if [[ -f "$f" ]]; then
-        pubkey="$(cat "$f")"
-        break
-      fi
-    done
+  # Собираем исходные ключи
+  local src_content=""
+  if [[ -s /root/.ssh/authorized_keys ]]; then
+    src_content="$(cat /root/.ssh/authorized_keys)"
+  elif compgen -G "/root/.ssh/*.pub" >/dev/null; then
+    src_content="$(cat /root/.ssh/*.pub)"
   fi
 
-  if [[ -z "${pubkey}" ]]; then
+  # Если ключей у root нет — предложить 2 варианта
+  if [[ -z "$src_content" ]]; then
     if $NONINTERACTIVE; then
-      print_err "Публичный ключ не найден. Задайте --key-file."
+      print_err "Ключи не найдены у root. Укажите --key-file в неинтерактивном режиме."
       exit 1
     fi
-    print_info "Публичный ключ не найден."
-    echo "1) Ввести свой ключ"
-    echo "2) Сгенерировать новый ed25519"
+    echo "Ключи у root не найдены. Выберите:"
+    echo "  1) Ввести свои публичные ключи (по одному в строке), затем Ctrl+D"
+    echo "  2) Сгенерировать новый ed25519"
     while true; do
       read -r -p "Ваш выбор (1/2): " ch
       case "$ch" in
         1)
-          print_info "Вставьте PUBLIC key (по одному в строке), затем Ctrl+D:"
-          pubkey="$(cat)"
-          [[ -n "$pubkey" ]] && break
-          print_err "Ключ пустой или неверного формата";;
+          print_info "Вставьте PUBLIC ключи (OpenSSH формат), окончание — Ctrl+D:"
+          src_content="$(cat)"
+          [[ -n "$src_content" ]] && break
+          print_err "Пустой ввод. Повторите." ;;
         2)
           install -d -m 700 -o root -g root /root/.ssh
           local name="${user}_ed25519"
           ssh-keygen -t ed25519 -f "/root/.ssh/${name}" -N "" -C "${user}@$(hostname)"
-          pubkey="$(cat "/root/.ssh/${name}.pub")"
+          src_content="$(cat "/root/.ssh/${name}.pub")"
           print_ok "Сгенерирован ключ. Приватный: /root/.ssh/${name}"
-          break;;
-        *) print_err "Выберите 1 или 2";;
+          break ;;
+        *) print_err "Введите 1 или 2." ;;
       esac
     done
   fi
 
   # Добавляем все строки-ключи без дублей
+  # (учитываем, что src_content может содержать несколько строк/ключей)
   local tmpfile
   tmpfile="$(mktemp)"
-  cat "$home_dir/.ssh/authorized_keys" > "$tmpfile"
+  cp -f "$home_dir/.ssh/authorized_keys" "$tmpfile"
 
   while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
+    # пропускаем пустые/комментарии
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
     if ! grep -qxF "$line" "$tmpfile"; then
       echo "$line" >> "$tmpfile"
     fi
-  done <<< "$pubkey"
+  done <<< "$src_content"
 
   install -m 600 -o "$user" -g "$user" "$tmpfile" "$home_dir/.ssh/authorized_keys"
   rm -f "$tmpfile"
+
   print_ok "Публичный ключ(и) установлен(ы) пользователю $user."
 }
+
 
 
 
