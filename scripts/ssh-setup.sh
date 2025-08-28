@@ -139,70 +139,162 @@ setup_ssh_keys() {
   local user="$1"
   local home_dir
   home_dir="$(getent passwd "$user" | cut -d: -f6)"
-
-  # ~/.ssh и authorized_keys с корректными правами
+  
+  # Проверяем, что домашний каталог существует
+  if [[ ! -d "$home_dir" ]]; then
+    print_err "Домашний каталог $home_dir не найден для пользователя $user"
+    return 1
+  fi
+  
+  # Создаем ~/.ssh и authorized_keys с корректными правами
   install -d -m 700 -o "$user" -g "$user" "$home_dir/.ssh"
   : > "$home_dir/.ssh/authorized_keys"
   chown "$user:$user" "$home_dir/.ssh/authorized_keys"
   chmod 600 "$home_dir/.ssh/authorized_keys"
-
-  # Собираем исходные ключи
+  
+  # Собираем исходные ключи из всех возможных источников
   local src_content=""
+  local found_keys=false
+  
+  # Проверяем authorized_keys у root
   if [[ -s /root/.ssh/authorized_keys ]]; then
     src_content="$(cat /root/.ssh/authorized_keys)"
-  elif compgen -G "/root/.ssh/*.pub" >/dev/null; then
-    src_content="$(cat /root/.ssh/*.pub)"
+    found_keys=true
+    print_info "Найдены ключи в /root/.ssh/authorized_keys"
   fi
-
-  # Если ключей у root нет — предложить 2 варианта
-  if [[ -z "$src_content" ]]; then
-    if $NONINTERACTIVE; then
-      print_err "Ключи не найдены у root. Укажите --key-file в неинтерактивном режиме."
-      exit 1
+  
+  # Проверяем публичные ключи у root
+  if compgen -G "/root/.ssh/*.pub" >/dev/null 2>&1; then
+    local pub_content
+    pub_content="$(cat /root/.ssh/*.pub 2>/dev/null)"
+    if [[ -n "$pub_content" ]]; then
+      if [[ -n "$src_content" ]]; then
+        src_content="${src_content}"$'\n'"${pub_content}"
+      else
+        src_content="$pub_content"
+      fi
+      found_keys=true
+      print_info "Найдены публичные ключи в /root/.ssh/*.pub"
     fi
-    echo "Ключи у root не найдены. Выберите:"
-    echo "  1) Ввести свои публичные ключи (по одному в строке), затем Ctrl+D"
-    echo "  2) Сгенерировать новый ed25519"
+  fi
+  
+  # Если ключей у root нет — предложить 2 варианта
+  if [[ "$found_keys" == false ]]; then
+    if ${NONINTERACTIVE:-false}; then
+      print_err "Ключи не найдены у root. Укажите --key-file в неинтерактивном режиме."
+      return 1
+    fi
+    
+    echo
+    print_info "Ключи у root не найдены. Выберите вариант:"
+    echo "  1) Ввести свои публичные ключи (многострочный ввод, завершить Ctrl+D)"
+    echo "  2) Сгенерировать новый ed25519 ключ"
+    echo
+    
     while true; do
       read -r -p "Ваш выбор (1/2): " ch
       case "$ch" in
         1)
-          print_info "Вставьте PUBLIC ключи (OpenSSH формат), окончание — Ctrl+D:"
-          src_content="$(cat)"
-          [[ -n "$src_content" ]] && break
-          print_err "Пустой ввод. Повторите." ;;
+          echo
+          print_info "Вставьте PUBLIC ключи (OpenSSH формат):"
+          print_info "Можно вставить несколько ключей, каждый на новой строке"
+          print_info "Завершите ввод нажатием Ctrl+D"
+          echo "---"
+          
+          # Читаем многострочный ввод до EOF (Ctrl+D)
+          local user_input=""
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            user_input="${user_input}${line}"$'\n'
+          done
+          
+          # Убираем последний перенос строки если он есть
+          user_input="${user_input%$'\n'}"
+          
+          if [[ -n "$user_input" ]]; then
+            src_content="$user_input"
+            print_ok "Получено $(echo "$user_input" | wc -l) строк(и) с ключами"
+            break
+          else
+            print_err "Пустой ввод. Попробуйте снова."
+          fi
+          ;;
         2)
+          # Создаем каталог .ssh у root если его нет
           install -d -m 700 -o root -g root /root/.ssh
-          local name="${user}_ed25519"
-          ssh-keygen -t ed25519 -f "/root/.ssh/${name}" -N "" -C "${user}@$(hostname)"
-          src_content="$(cat "/root/.ssh/${name}.pub")"
-          print_ok "Сгенерирован ключ. Приватный: /root/.ssh/${name}"
-          break ;;
-        *) print_err "Введите 1 или 2." ;;
+          
+          local key_name="${user}_ed25519"
+          local key_path="/root/.ssh/${key_name}"
+          
+          print_info "Генерируем ed25519 ключ..."
+          if ssh-keygen -t ed25519 -f "$key_path" -N "" -C "${user}@$(hostname)" >/dev/null 2>&1; then
+            src_content="$(cat "${key_path}.pub")"
+            print_ok "Ключ сгенерирован успешно!"
+            print_info "Приватный ключ: ${key_path}"
+            print_info "Публичный ключ: ${key_path}.pub"
+            break
+          else
+            print_err "Ошибка генерации ключа. Попробуйте вариант 1."
+          fi
+          ;;
+        *)
+          print_err "Введите 1 или 2."
+          ;;
       esac
     done
   fi
-
+  
+  # Проверяем, что у нас есть содержимое для добавления
+  if [[ -z "$src_content" ]]; then
+    print_err "Нет ключей для установки"
+    return 1
+  fi
+  
   # Добавляем все строки-ключи без дублей
-  # (учитываем, что src_content может содержать несколько строк/ключей)
   local tmpfile
   tmpfile="$(mktemp)"
-  cp -f "$home_dir/.ssh/authorized_keys" "$tmpfile"
-
+  
+  # Копируем существующие ключи
+  if [[ -f "$home_dir/.ssh/authorized_keys" ]]; then
+    cp -f "$home_dir/.ssh/authorized_keys" "$tmpfile"
+  fi
+  
+  # Добавляем новые ключи, проверяя на дубликаты
+  local added_count=0
   while IFS= read -r line; do
-    # пропускаем пустые/комментарии
+    # Пропускаем пустые строки и комментарии
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-    if ! grep -qxF "$line" "$tmpfile"; then
-      echo "$line" >> "$tmpfile"
+    
+    # Убираем лишние пробелы
+    line="$(echo "$line" | xargs)"
+    [[ -z "$line" ]] && continue
+    
+    # Проверяем, что это похоже на SSH ключ
+    if [[ "$line" =~ ^(ssh-|ecdsa-|sk-) ]]; then
+      # Проверяем на дубликаты
+      if ! grep -qxF "$line" "$tmpfile" 2>/dev/null; then
+        echo "$line" >> "$tmpfile"
+        ((added_count++))
+      fi
+    else
+      print_err "Пропускаем строку (не SSH ключ): ${line:0:50}..."
     fi
   done <<< "$src_content"
-
+  
+  # Устанавливаем файл с правильными правами
   install -m 600 -o "$user" -g "$user" "$tmpfile" "$home_dir/.ssh/authorized_keys"
   rm -f "$tmpfile"
-
-  print_ok "Публичный ключ(и) установлен(ы) пользователю $user."
+  
+  if [[ "$added_count" -gt 0 ]]; then
+    print_ok "Добавлено $added_count публичный(х) ключ(ей) пользователю $user"
+  else
+    print_info "Новые ключи не добавлены (возможно, уже существуют)"
+  fi
+  
+  # Показываем финальный статус
+  local total_keys
+  total_keys="$(grep -c "^ssh-\|^ecdsa-\|^sk-" "$home_dir/.ssh/authorized_keys" 2>/dev/null || echo 0)"
+  print_info "Всего ключей у пользователя $user: $total_keys"
 }
-
 
 
 
