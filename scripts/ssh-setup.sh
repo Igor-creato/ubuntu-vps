@@ -148,6 +148,13 @@ create_ssh_config() {
     else
         echo "AllowUsers $username" >> /etc/ssh/sshd_config
     fi
+    
+    # Перезагружаем SSH для применения изменений
+    systemctl restart ssh
+    if ! systemctl is-active --quiet ssh; then
+        error_exit "Ошибка при перезагрузке SSH сервера после изменения конфигурации"
+    fi
+    log "SSH конфигурация применена и сервис перезагружен"
 }
 
 # Функция проверки валидности SSH ключа
@@ -417,9 +424,15 @@ change_ssh_port() {
             # Создаем новую конфигурацию SSH
             create_ssh_config "$SSHD_PORT" "$USERNAME"
             
-            # Перезагружаем SSH сервер
+            # Перезагружаем SSH сервер для применения изменений
             systemctl restart ssh
             log "SSH порт изменен на $SSHD_PORT и сервис перезагружен"
+            
+            # Проверяем что сервер запустился успешно
+            if ! systemctl is-active --quiet ssh; then
+                error_exit "Ошибка при перезагрузке SSH сервера. Проверьте конфигурацию."
+            fi
+            
             break
         else
             echo "Неверный порт. Должен быть числом от 1024 до 65535"
@@ -479,6 +492,11 @@ setup_ufw() {
     # Перезагружаем службы
     systemctl restart ssh
     systemctl restart fail2ban
+    
+    # Проверяем что SSH запустился
+    if ! systemctl is-active --quiet ssh; then
+        error_exit "Ошибка при перезагрузке SSH сервера после настройки UFW"
+    fi
     
     log "Порт 22 закрыт, службы перезагружены"
 }
