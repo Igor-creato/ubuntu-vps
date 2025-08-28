@@ -480,6 +480,7 @@ setup_ufw() {
     
     # Включаем UFW
     ufw --force enable >> "$LOG_FILE" 2>&1
+    systemctl restart ssh
     log "UFW настроен с портами 22, 80, 443 и $SSHD_PORT"
     
     echo "=== ВАЖНОЕ ПРЕДУПРЕЖДЕНИЕ ==="
