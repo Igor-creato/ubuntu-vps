@@ -2,7 +2,7 @@
 
 set -e
 
-echo "🚀 Начало развертывания n8n с Docker volumes (актуальные стандарты)"
+echo "🚀 Полное развертывание n8n с PostgreSQL и Traefik"
 
 # Создаем рабочую директорию
 N8N_DIR="$HOME/n8n"
@@ -14,9 +14,12 @@ cd "$N8N_DIR"
 echo "📂 Создаем директорию для секретов"
 mkdir -p secrets
 
-# Очищаем старые volumes чтобы избежать конфликтов
-echo "🧹 Очищаем старые volumes (если существуют)"
-docker volume rm n8n-postgres-data n8n-app-data n8n-shared-files 2>/dev/null || true
+# Останавливаем и удаляем старые контейнеры
+echo "🧹 Очищаем старые контейнеры и volumes"
+docker compose down -v 2>/dev/null || true
+
+# Удаляем старые volumes чтобы избежать конфликтов
+docker volume rm n8n-postgres-data n8n-app-data 2>/dev/null || true
 
 # Создаем docker-compose.yml с современным синтаксисом
 echo "📝 Создаем docker-compose.yml"
@@ -72,7 +75,6 @@ services:
       N8N_PUBLIC_API_DISABLED: "true"
     volumes:
       - n8n_data:/home/node/.n8n
-      - n8n_files:/files
       - type: bind
         source: ./secrets/postgres_password
         target: /run/secrets/postgres_password
@@ -108,8 +110,6 @@ volumes:
     name: n8n-postgres-data
   n8n_data:
     name: n8n-app-data
-  n8n_files:
-    name: n8n-shared-files
 EOF
 
 echo "✅ docker-compose.yml создан"
@@ -121,11 +121,11 @@ POSTGRES_PASSWORD=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-32)
 N8N_ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-32)
 N8N_BASIC_AUTH_PASSWORD=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-16)
 
-# Запрос только доменного имени (без email, так как Traefik уже настроен)
+# Запрос доменного имени
 echo "🌐 Запрос конфигурационной информации"
 read -p "Введите доменное имя для n8n (например: n8n.example.com): " N8N_HOST
 
-# Создаем .env файл только с необходимыми переменными
+# Создаем .env файл
 echo "📝 Создаем .env файл"
 cat > .env << EOF
 # Доменное имя для n8n
@@ -150,6 +150,16 @@ chmod 600 .env
 chmod 600 ./secrets/*
 chmod 700 secrets
 
+# Проверяем наличие сети proxy
+echo "🌐 Проверяем сеть proxy"
+if ! docker network inspect proxy >/dev/null 2>&1; then
+    echo "❌ Сеть proxy не найдена, создаем..."
+    docker network create proxy
+    echo "✅ Сеть proxy создана"
+else
+    echo "✅ Сеть proxy существует"
+fi
+
 # Выводим одноразовую информацию
 echo ""
 echo "================================================"
@@ -172,47 +182,64 @@ read -p "Нажмите Enter чтобы продолжить..."
 echo "🐳 Запускаем n8n с помощью Docker Compose"
 docker compose up -d
 
-echo ""
-echo "✅ Развертывание завершено!"
-echo "🌐 n8n будет доступен по адресу: https://$N8N_HOST"
-echo "⏳ Подождите 1-2 минуты пока запустятся контейнеры"
+echo "⏳ Ожидаем запуск контейнеров (30 секунд)..."
+sleep 30
 
 # Проверяем статус контейнеров
 echo ""
 echo "📊 Статус контейнеров:"
-sleep 10
 docker compose ps
 
 # Проверяем логи n8n для диагностики
 echo ""
-echo "🔍 Проверяем логи n8n (первые 10 строк):"
-docker compose logs n8n --tail=10
+echo "🔍 Проверяем логи n8n:"
+docker compose logs n8n --tail=20
 
 # Проверяем подключение к сети proxy
 echo ""
-echo "🌐 Проверяем подключение к сети proxy:"
-docker network inspect proxy >/dev/null 2>&1 && echo "✅ Сеть proxy существует" || echo "❌ Сеть proxy не найдена"
-
-# Проверяем что контейнер n8n подключен к сети proxy
-echo ""
-echo "🔗 Проверяем подключение контейнера n8n к сетям:"
-N8N_CONTAINER_ID=$(docker compose ps -q n8n)
+echo "🔗 Проверяем подключение к сети proxy:"
+N8N_CONTAINER_ID=$(docker compose ps -q n8n 2>/dev/null)
 if [ -n "$N8N_CONTAINER_ID" ]; then
-    docker inspect $N8N_CONTAINER_ID | grep -A 10 "proxy" | grep -E "(NetworkMode|Networks)" || echo "❌ Контейнер n8n не подключен к сети proxy"
+    if docker inspect $N8N_CONTAINER_ID | grep -q "proxy"; then
+        echo "✅ Контейнер n8n подключен к сети proxy"
+    else
+        echo "❌ Контейнер n8n НЕ подключен к сети proxy"
+        echo "🔄 Перезапускаем контейнер с правильными настройками сети..."
+        docker compose down
+        docker compose up -d
+        sleep 10
+    fi
 else
     echo "❌ Контейнер n8n не запущен"
 fi
 
+# Проверяем работу n8n
 echo ""
-echo "📋 Для полной проверки статуса: docker compose logs -f"
-echo "📊 Для просмотра volumes: docker volume ls | grep n8n"
-echo "🔧 Для остановки: docker compose down"
-echo "🔄 Для обновления: docker compose pull && docker compose up -d"
+echo "🔧 Проверяем работу n8n:"
+N8N_STATUS=$(docker compose exec n8n curl -s -o /dev/null -w "%{http_code}" http://localhost:5678/ || echo "failed")
+if [ "$N8N_STATUS" = "200" ] || [ "$N8N_STATUS" = "302" ]; then
+    echo "✅ n8n работает внутри контейнера"
+else
+    echo "❌ n8n не отвечает внутри контейнера: статус $N8N_STATUS"
+    echo "📋 Подробные логи:"
+    docker compose logs n8n --tail=50
+fi
 
-# Дополнительная диагностика для Traefik
 echo ""
-echo "🔧 ДЛЯ ДИАГНОСТИКИ TRAEFIK:"
-echo "1. Убедитесь, что Traefik запущен: docker ps | grep traefik"
-echo "2. Проверьте логи Traefik: docker logs [traefik-container-id]"
-echo "3. Убедитесь, что домен $N8N_HOST указывает на IP вашего сервера"
-echo "4. Проверьте, что порты 80 и 443 открыты на firewall"
+echo "✅ Развертывание завершено!"
+echo "🌐 n8n должен быть доступен по: https://$N8N_HOST"
+echo "⏳ Если это первый запуск, подождите несколько минут пока Traefik получит SSL сертификаты"
+
+echo ""
+echo "📋 Команды для управления:"
+echo "   Просмотр логов: docker compose logs -f"
+echo "   Остановка: docker compose down"
+echo "   Перезапуск: docker compose restart"
+echo "   Обновление: docker compose pull && docker compose up -d"
+
+echo ""
+echo "🔧 Если возникли проблемы с доступом:"
+echo "1. Проверьте что домен $N8N_HOST указывает на IP сервера"
+echo "2. Убедитесь что Traefik запущен: docker ps | grep traefik"
+echo "3. Проверьте логи Traefik: docker logs traefik-traefik-1"
+echo "4. Убедитесь что порты 80 и 443 открыты на firewall"
