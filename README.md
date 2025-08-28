@@ -16,3 +16,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/d
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/traefik/setup-traefik.sh)
 ```
+install n8n
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/n8n/install-n8n.sh)
+```
+```bash
