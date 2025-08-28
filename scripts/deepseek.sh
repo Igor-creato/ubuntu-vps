@@ -156,10 +156,38 @@ normalize_ssh_key() {
     fi
 }
 
+# Создание директории .ssh и установка прав
+setup_ssh_dir() {
+    local user_ssh="/home/$USERNAME/.ssh"
+    local user_key="$user_ssh/authorized_keys"
+    
+    # Создаем директорию .ssh если ее нет
+    if [ ! -d "$user_ssh" ]; then
+        mkdir -p "$user_ssh"
+        log "Создана директория $user_ssh"
+    fi
+    
+    # Устанавливаем правильные права
+    chown -R "$USERNAME:$USERNAME" "$user_ssh"
+    chmod 700 "$user_ssh"
+    
+    # Создаем файл authorized_keys если его нет
+    if [ ! -f "$user_key" ]; then
+        touch "$user_key"
+        chown "$USERNAME:$USERNAME" "$user_key"
+        chmod 600 "$user_key"
+        log "Создан файл $user_key"
+    fi
+    
+    echo "$user_ssh"
+}
+
 # Работа с SSH ключами
 manage_ssh_keys() {
     local root_key="/root/.ssh/authorized_keys"
-    local user_ssh="/home/$USERNAME/.ssh"
+    
+    # Создаем директорию .ssh для пользователя
+    local user_ssh=$(setup_ssh_dir)
     local user_key="$user_ssh/authorized_keys"
     
     if [ -f "$root_key" ] && [ -s "$root_key" ]; then
@@ -170,11 +198,8 @@ manage_ssh_keys() {
         
         case $choice in
             1)
-                mkdir -p "$user_ssh"
                 cp "$root_key" "$user_key"
-                # Исправлено: правильный формат для chown
-                chown -R "$USERNAME:$USERNAME" "$user_ssh" || error_exit "Ошибка изменения владельца для $user_ssh"
-                chmod 700 "$user_ssh"
+                chown "$USERNAME:$USERNAME" "$user_key"
                 chmod 600 "$user_key"
                 rm -f "$root_key"
                 log "Ключи перенесены от root к $USERNAME"
@@ -198,7 +223,6 @@ add_ssh_key() {
     local key_file="$2"
     local key_data=""
     
-    mkdir -p "$ssh_dir"
     echo "Введите публичный ключ (Ctrl+D для завершения):"
     
     # Чтение многострочного ввода
@@ -216,10 +240,7 @@ add_ssh_key() {
         
         # Добавление ключа в файл
         echo "$normalized_key" >> "$key_file"
-        # Исправлено: правильный формат для chown
-        chown -R "$USERNAME:$USERNAME" "$ssh_dir" || error_exit "Ошибка изменения владельца для $ssh_dir"
-        chmod 700 "$ssh_dir"
-        chmod 600 "$key_file"
+        chown "$USERNAME:$USERNAME" "$key_file"
         log "Добавлен новый SSH ключ"
     else
         error_exit "Введен невалидный SSH ключ"
