@@ -23,6 +23,76 @@ trim() {
     printf '%s' "$var"
 }
 
+# Функция создания и настройки .ssh директории
+setup_ssh_directory() {
+    local username=$(trim "$1")
+    local ssh_dir="/home/$username/.ssh"
+    
+    log "Настройка SSH директории для пользователя $username"
+    
+    # Создаем директорию .ssh если ее нет
+    if [ ! -d "$ssh_dir" ]; then
+        mkdir -p "$ssh_dir"
+        log "Создана директория $ssh_dir"
+    fi
+    
+    # Устанавливаем правильные права
+    chmod 700 "$ssh_dir"
+    chown -R "$username:$username" "$ssh_dir"
+    
+    # Создаем файл authorized_keys если его нет
+    local auth_keys="$ssh_dir/authorized_keys"
+    if [ ! -f "$auth_keys" ]; then
+        touch "$auth_keys"
+        chmod 600 "$auth_keys"
+        chown "$username:$username" "$auth_keys"
+        log "Создан файл $auth_keys"
+    fi
+    
+    echo "$ssh_dir"
+}
+
+# Функция создания новой конфигурации SSH
+create_ssh_config() {
+    local port="$1"
+    local username="$2"
+    
+    log "Создание новой конфигурации SSH для порта $port и пользователя $username"
+    
+    # Создаем backup текущей конфигурации
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d_%H%M%S)
+    
+    # Создаем новую конфигурацию
+    cat << EOF | tee /etc/ssh/sshd_config > /dev/null
+# Port configuration
+Port $port
+
+# Authentication options
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitRootLogin no
+AllowUsers $username
+ChallengeResponseAuthentication no
+
+# PAM configuration
+UsePAM yes
+
+# Other options
+X11Forwarding yes
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# Security enhancements
+ClientAliveInterval 300
+ClientAliveCountMax 2
+MaxAuthTries 3
+LoginGraceTime 60
+EOF
+
+    log "Новая конфигурация SSH создана"
+}
+
 # Проверка ОС
 check_os() {
     log "Проверка версии Ubuntu..."
@@ -104,6 +174,10 @@ create_user() {
                 adduser --gecos "" --disabled-password "$username" >> "$LOG_FILE" 2>&1
                 usermod -aG sudo "$username"
                 USERNAME="$username"
+                
+                # Создаем и настраиваем .ssh директорию для нового пользователя
+                setup_ssh_directory "$USERNAME"
+                
                 break
             fi
         else
@@ -156,38 +230,12 @@ normalize_ssh_key() {
     fi
 }
 
-# Создание директории .ssh и установка прав
-setup_ssh_dir() {
-    local user_ssh="/home/$USERNAME/.ssh"
-    local user_key="$user_ssh/authorized_keys"
-    
-    # Создаем директорию .ssh если ее нет
-    if [ ! -d "$user_ssh" ]; then
-        mkdir -p "$user_ssh"
-        log "Создана директория $user_ssh"
-    fi
-    
-    # Устанавливаем правильные права
-    chown -R "$USERNAME:$USERNAME" "$user_ssh"
-    chmod 700 "$user_ssh"
-    
-    # Создаем файл authorized_keys если его нет
-    if [ ! -f "$user_key" ]; then
-        touch "$user_key"
-        chown "$USERNAME:$USERNAME" "$user_key"
-        chmod 600 "$user_key"
-        log "Создан файл $user_key"
-    fi
-    
-    echo "$user_ssh"
-}
-
 # Работа с SSH ключами
 manage_ssh_keys() {
     local root_key="/root/.ssh/authorized_keys"
     
-    # Создаем директорию .ssh для пользователя
-    local user_ssh=$(setup_ssh_dir)
+    # Создаем и настраиваем .ssh директорию для выбранного пользователя
+    local user_ssh=$(setup_ssh_directory "$USERNAME")
     local user_key="$user_ssh/authorized_keys"
     
     if [ -f "$root_key" ] && [ -s "$root_key" ]; then
@@ -255,16 +303,10 @@ change_ssh_port() {
         read -rp "Введите новый порт SSH: " port
         port=$(trim "$port")
         if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ]; then
-            # Создаем backup конфигурации
-            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
-            # Изменяем порт
-            sed -i "s/^#Port.*/Port $port/" /etc/ssh/sshd_config
-            sed -i "s/^Port.*/Port $port/" /etc/ssh/sshd_config
-            # Если порт не был задан, добавляем новую строку
-            if ! grep -q "^Port" /etc/ssh/sshd_config; then
-                echo "Port $port" >> /etc/ssh/sshd_config
-            fi
             SSHD_PORT="$port"
+            
+            # Создаем новую конфигурацию SSH
+            create_ssh_config "$SSHD_PORT" "$USERNAME"
             
             # Перезагружаем SSH сервер для применения изменений
             systemctl restart ssh
@@ -288,6 +330,8 @@ enabled = true
 port = $SSHD_PORT
 logpath = %(sshd_log)s
 maxretry = 3
+findtime = 600
+bantime = 600
 EOF
     
     systemctl restart fail2ban
@@ -317,13 +361,8 @@ setup_ufw() {
         confirm=$(trim "$confirm")
         case $confirm in
             y|Y)
-                # Закрываем порт 22 и отключаем парольную аутентификацию
+                # Закрываем порт 22
                 ufw delete allow 22/tcp >> "$LOG_FILE" 2>&1
-                
-                # Отключаем парольную аутентификацию
-                sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-                sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-                echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
                 
                 # Перезагружаем службы
                 systemctl restart ssh
