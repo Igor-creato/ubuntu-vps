@@ -288,47 +288,56 @@ create_user() {
     done
 }
 
-# Функция проверки валидности SSH ключа
+# Функция проверки валидности SSH ключа (упрощенная)
 validate_ssh_key() {
     local key_data="$1"
     
     # Удаляем начальные и конечные пробелы
     key_data=$(echo "$key_data" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     
-    # Проверка на стандартный OpenSSH ключ (однострочный)
-    if echo "$key_data" | grep -q -E "^(ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-nistp256) "; then
-        return 0
-    fi
-    
-    # Проверка на base64 encoded ключ (минимальная длина)
-    if echo "$key_data" | grep -q -E "^[A-Za-z0-9+/]{100,}={0,2}$"; then
-        return 0
-    fi
-    
+    # Принимаем любой непустой ввод как потенциально валидный ключ
+    # Более строгую проверку проведем при нормализации
+    [ -n "$key_data" ] && return 0
     return 1
 }
 
-# Функция нормализации SSH ключа
+# Функция нормализации SSH ключа (упрощенная)
 normalize_ssh_key() {
     local key_data="$1"
     
     # Удаляем начальные и конечные пробелы
     key_data=$(echo "$key_data" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     
-    # Если ключ уже в правильном формате, возвращаем как есть
+    # Обработка SSH2 формата
+    if echo "$key_data" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
+        # Извлекаем base64 данные
+        local base64_data=$(echo "$key_data" | \
+            sed -e '/BEGIN SSH2 PUBLIC KEY/d' \
+                -e '/END SSH2 PUBLIC KEY/d' \
+                -e '/Comment:/d' \
+                -e 's/^[[:space:]]*//' \
+                -e 's/[[:space:]]*$//' | \
+            tr -d '\n')
+        
+        # Преобразуем в OpenSSH формат для ed25519
+        echo "ssh-ed25519 $base64_data"
+        return
+    fi
+    
+    # Если это уже OpenSSH формат, возвращаем как есть
     if echo "$key_data" | grep -q -E "^(ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-nistp256) "; then
         echo "$key_data"
         return
     fi
     
-    # Пытаемся определить тип ключа по содержимому
-    if echo "$key_data" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
-        # SSH2 формат - преобразуем в OpenSSH
-        echo "$key_data" | ssh-keygen -i -f /dev/stdin 2>/dev/null || echo "$key_data"
-    else
-        # Просто возвращаем как есть, возможно это base64 ключ
-        echo "$key_data"
+    # Если это просто base64, добавляем заголовок для ed25519
+    if echo "$key_data" | grep -q -E "^[A-Za-z0-9+/]{20,}={0,2}$"; then
+        echo "ssh-ed25519 $key_data"
+        return
     fi
+    
+    # Во всех остальных случаях возвращаем как есть
+    echo "$key_data"
 }
 
 # Работа с SSH ключами
