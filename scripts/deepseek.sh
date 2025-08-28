@@ -198,7 +198,8 @@ manage_ssh_keys() {
         
         case $choice in
             1)
-                cp "$root_key" "$user_key"
+                # Копируем ключи от root и заменяем существующие
+                cp -f "$root_key" "$user_key"
                 chown "$USERNAME:$USERNAME" "$user_key"
                 chmod 600 "$user_key"
                 rm -f "$root_key"
@@ -238,9 +239,10 @@ add_ssh_key() {
         # Нормализация ключа (преобразование в однострочный формат если нужно)
         local normalized_key=$(normalize_ssh_key "$key_data")
         
-        # Добавление ключа в файл
-        echo "$normalized_key" >> "$key_file"
+        # Очищаем файл и добавляем ключ (перезаписываем)
+        echo "$normalized_key" > "$key_file"
         chown "$USERNAME:$USERNAME" "$key_file"
+        chmod 600 "$key_file"
         log "Добавлен новый SSH ключ"
     else
         error_exit "Введен невалидный SSH ключ"
@@ -263,12 +265,15 @@ change_ssh_port() {
                 echo "Port $port" >> /etc/ssh/sshd_config
             fi
             SSHD_PORT="$port"
+            
+            # Перезагружаем SSH сервер для применения изменений
+            systemctl restart ssh
+            log "SSH порт изменен на $SSHD_PORT и сервис перезагружен"
             break
         else
             echo "Неверный порт. Должен быть числом от 1024 до 65535"
         fi
     done
-    log "SSH порт изменен на $SSHD_PORT"
 }
 
 # Установка fail2ban
