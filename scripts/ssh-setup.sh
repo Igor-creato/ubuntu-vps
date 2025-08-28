@@ -6,7 +6,7 @@
 #   --key-file <path>        путь к публичному ключу (OpenSSH формат)
 #   --nopasswd-sudo          дать sudo без пароля (повышенный риск)
 #   --non-interactive        ошибаться вместо вопросов
-#   --port-only              пропустить создание/ключи; сменить только порт (USERNAME обязателен или будет выбран последний созданный)
+#   --port-only              пропустить создание/ключи; сменить только порт (USERNAME обязателен или берётся последний созданный)
 
 set -Eeuo pipefail
 shopt -s extglob
@@ -46,7 +46,7 @@ done
 # ---------- Вспомогательные ----------
 is_valid_username() { [[ "$1" =~ ^[a-z_][a-z0-9._-]{0,31}$ ]]; }
 is_valid_port()     { local p="$1"; [[ "$p" =~ ^[0-9]+$ ]] && (( p>=1024 && p<=65535 )); }
-port_is_free()      { local p="$1"; ! ss -Htlpn 2>/dev/null | grep -E "[:\]]${p}\b" >/dev/null; }
+port_is_free()      { local p="$1"; command -v ss >/dev/null && ! ss -Htlpn 2>/dev/null | grep -E "[:\]]${p}\b" >/dev/null; }
 
 backup_file() {
   local f="$1"
@@ -58,7 +58,6 @@ backup_file() {
 }
 
 set_sshd_opt() {
-  # set_sshd_opt "Directive" "Value"  => гарантированная установка параметра
   local key="$1" val="$2" file="/etc/ssh/sshd_config"
   if grep -Eiq "^\s*#?\s*${key}\b" "$file"; then
     sed -ri "s|^\s*#?\s*${key}\b.*|${key} ${val}|I" "$file"
@@ -68,7 +67,6 @@ set_sshd_opt() {
 }
 
 append_allow_user() {
-  # Добавляет пользователя в AllowUsers, не теряя уже указанных
   local user="$1" file="/etc/ssh/sshd_config"
   if grep -Eiq '^\s*AllowUsers\b' "$file"; then
     if ! grep -Eq "^\s*AllowUsers\b.*\b${user}\b" "$file"; then
@@ -80,11 +78,9 @@ append_allow_user() {
 }
 
 current_ssh_port() {
-  # Вычисляем текущий порт sshd (пытаемся из конфига, иначе 22)
   local file="/etc/ssh/sshd_config" p=""
   p="$(awk 'tolower($1)=="port"{print $2}' "$file" 2>/dev/null | tail -1 || true)"
   [[ -n "$p" ]] && { echo "$p"; return; }
-  # запасной вариант: sshd -T (если доступно)
   if command -v sshd >/dev/null 2>&1; then
     p="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
     [[ -n "$p" ]] && { echo "$p"; return; }
@@ -92,10 +88,7 @@ current_ssh_port() {
   echo 22
 }
 
-ensure_dirs() {
-  # Лечим Missing privilege separation directory
-  install -d -m 0755 /run/sshd
-}
+ensure_dirs() { install -d -m 0755 /run/sshd; }
 
 # ---------- Пакеты/сервисы ----------
 export DEBIAN_FRONTEND=noninteractive
@@ -201,7 +194,7 @@ setup_ssh_keys() {
       echo "Выберите действие:"
       echo "  1) Перенести ключи root пользователю $user"
       echo "  2) Вставить/передать свой публичный ключ(и)"
-      echo "  3) Сгенерировать новый ключ (ed25519) для $user"
+      echo "  3) Сгенерировать новый ключ (ед25519) для $user"
       read -rp "[?] Вариант [1/2/3]: " choice
     fi
   else
@@ -212,7 +205,7 @@ setup_ssh_keys() {
     else
       echo "Ключей у root не найдено. Выберите:"
       echo "  1) Вставить/передать свой публичный ключ(и)"
-      echo "  2) Сгенерировать новый ключ (ed25519) для $user"
+      echo "  2) Сгенерировать новый ключ (ед25519) для $user"
       read -rp "[?] Вариант [1/2]: " choice
       [[ "$choice" == "2" ]] && choice="3"
     fi
@@ -222,7 +215,7 @@ setup_ssh_keys() {
   ( cat "$home_dir/.ssh/authorized_keys" 2>/dev/null || true ) >"$tmp"
 
   add_lines() {
-    local line added_local=0
+    local line; local added_local=0
     while IFS= read -r line; do
       line="${line//$'\r'/}"
       line="${line#"${line%%[![:space:]]*}"}"
@@ -239,24 +232,42 @@ setup_ssh_keys() {
   local added=0
   case "$choice" in
     1)
-      [[ -s "$ROOT_AUTH" ]] && count="$(add_lines < "$ROOT_AUTH")" && ((added+=count))
+      # перенос из authorized_keys
+      if [[ -s "$ROOT_AUTH" ]]; then
+        local count=0
+        count="$(add_lines < "$ROOT_AUTH" || echo 0)"; count="${count:-0}"
+        ((added+=count))
+      fi
+      # перенос из всех .pub без пайпов
       if compgen -G "/root/.ssh/*.pub" >/dev/null 2>&1; then
-        count="$(cat /root/.ssh/*.pub 2>/dev/null | add_lines)"; ((added+=count))
+        local f this=0
+        for f in /root/.ssh/*.pub; do
+          [[ -r "$f" ]] || continue
+          this="$(add_lines < "$f" || echo 0)"; this="${this:-0}"
+          ((added+=this))
+        done
       fi
       ;;
     2)
       if [[ -n "$key_file" ]]; then
         [[ -r "$key_file" ]] || { print_err "Файл ключей недоступен: $key_file"; exit 1; }
-        count="$(add_lines < "$key_file")"; ((added+=count))
+        local count=0
+        count="$(add_lines < "$key_file" || echo 0)"; count="${count:-0}"
+        ((added+=count))
       else
         print_info "Вставьте PUBLIC ключи (OpenSSH), по одному в строке. Завершите ввод Ctrl+D."
-        echo "---"; count="$(add_lines)"; ((added+=count))
+        echo "---"
+        local count=0
+        count="$(add_lines || echo 0)"; count="${count:-0}"
+        ((added+=count))
       fi
       ;;
     3)
       print_info "Генерация ed25519 ключа для $user…"
       su - "$user" -c "ssh-keygen -t ed25519 -a 100 -N '' -f ~/.ssh/id_ed25519 >/dev/null"
-      count="$(add_lines < "$home_dir/.ssh/id_ed25519.pub")"; ((added+=count))
+      local count=0
+      count="$(add_lines < "$home_dir/.ssh/id_ed25519.pub" || echo 0)"; count="${count:-0}"
+      ((added+=count))
       ;;
     *) print_err "Некорректный выбор ключей."; exit 1;;
   esac
@@ -281,7 +292,6 @@ setup_ssh_keys() {
 if ! $PORT_ONLY; then
   setup_ssh_keys "${USERNAME:-}"
 else
-  # Для AllowUsers нужен существующий пользователь (если задан)
   if [[ -z "${USERNAME:-}" ]]; then
     USERNAME="$(awk -F: '($3>=1000)&&($1!="nobody"){print $1":"$3}' /etc/passwd | sort -t: -k2,2n | tail -1 | cut -d: -f1 || true)"
   fi
@@ -292,9 +302,7 @@ fi
 OLD_PORT="$(current_ssh_port)"
 
 if [[ -z "$NEW_PORT" ]]; then
-  if $NONINTERACTIVE; then
-    print_err "В non-interactive требуется --port"; exit 1
-  fi
+  if $NONINTERACTIVE; then print_err "В non-interactive требуется --port"; exit 1; fi
   while :; do
     read -rp "Введите новый порт SSH (1024-65535): " NEW_PORT
     is_valid_port "$NEW_PORT" || { print_warn "Неверный порт"; continue; }
@@ -309,23 +317,18 @@ fi
 print_info "Обновляю /etc/ssh/sshd_config…"
 backup_file /etc/ssh/sshd_config
 
-# Жёсткие настройки аутентификации
 set_sshd_opt "PasswordAuthentication" "no"
 set_sshd_opt "ChallengeResponseAuthentication" "no"
 set_sshd_opt "PermitRootLogin" "no"
 set_sshd_opt "PubkeyAuthentication" "yes"
 set_sshd_opt "UsePAM" "yes"
 set_sshd_opt "X11Forwarding" "no"
-
-# Порт
 set_sshd_opt "Port" "$NEW_PORT"
 
-# AllowUsers (если знаем пользователя)
 if [[ -n "${USERNAME:-}" ]]; then
   append_allow_user "$USERNAME"
 fi
 
-# Проверка конфигурации перед рестартом
 ensure_dirs
 if ! sshd -t -f /etc/ssh/sshd_config; then
   print_err "Проверка sshd_config не прошла. Откатываю порт."
@@ -335,18 +338,8 @@ fi
 
 # ---------- UFW ----------
 print_info "Настройка UFW…"
-ufw status >/dev/null 2>&1 || { print_warn "UFW недоступен или не установлен корректно."; }
 if command -v ufw >/dev/null 2>&1; then
-  # Разрешаем новый порт до рестарта sshd
   ufw allow "$NEW_PORT"/tcp || true
-  # Если старый порт был 22 или разрешён, оставим его до успешного рестарта
-  if ufw status | grep -qE "\b${OLD_PORT}/tcp\b.*ALLOW"; then
-    print_info "Старый порт ${OLD_PORT}/tcp уже разрешён — оставляю до рестарта."
-  else
-    # Не добавляем старый, чтобы не расширять поверхность — только если уже был
-    :
-  fi
-  # Включаем UFW, если выключен
   ufw --force enable || true
 fi
 
@@ -365,27 +358,19 @@ maxretry = 5
 findtime = 10m
 bantime  = 1h
 EOF
-
 systemctl enable fail2ban --now
 systemctl reload fail2ban || systemctl restart fail2ban || true
 
-# ---------- Перезапуск SSH безопасно ----------
+# ---------- Перезапуск SSH ----------
 print_info "Перезапускаю sshd…"
 systemctl restart ssh || systemctl reload ssh || { print_err "Не удалось перезапустить sshd"; exit 1; }
-
-# Если всё хорошо — можно закрыть старый порт (если он был и отличается)
-if command -v ufw >/dev/null 2>&1 && [[ "$OLD_PORT" != "$NEW_PORT" ]]; then
-  if ufw status | grep -qE "\b${OLD_PORT}/tcp\b.*ALLOW"; then
-    ufw delete allow "${OLD_PORT}/tcp" || true
-  fi
-fi
 
 # ---------- Финальные проверки ----------
 sleep 1
 if ss -Hntl 2>/dev/null | grep -q "[:\]]${NEW_PORT}\b"; then
   print_ok "sshd слушает порт ${NEW_PORT}/tcp"
 else
-  print_warn "Не вижу прослушивания порта ${NEW_PORT}. Проверьте вручную: ss -ntl | grep ${NEW_PORT}"
+  print_warn "Не вижу прослушивания порта ${NEW_PORT}. Проверьте: ss -ntl | grep ${NEW_PORT}"
 fi
 
 print_ok "Готово:
@@ -393,8 +378,7 @@ print_ok "Готово:
  - Порт SSH: $NEW_PORT (старый: $OLD_PORT)
  - Парольный вход: отключён
  - root вход: отключён
- - UFW: новый порт разрешён
+ - UFW: новый порт разрешён (если UFW установлен)
  - fail2ban: включён для sshd на порту $NEW_PORT
 "
-
 exit 0
