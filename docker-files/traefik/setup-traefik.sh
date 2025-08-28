@@ -87,7 +87,7 @@ fi
 # ------------------------------------------------------------------
 # 3. Создаём внешнюю сеть, если её нет
 if ! docker network inspect traefik-public >/dev/null 2>&1; then
-    echo -e "${YELLOW}Создаём сеть traefik-public...${NC}"
+    echo -e "${YELLOW}Создаём сеть proxy...${NC}"
     docker network create proxy
 else
     echo -e "${GREEN}Сеть traefik-public уже существует.${NC}"
