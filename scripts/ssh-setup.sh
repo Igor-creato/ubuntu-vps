@@ -76,7 +76,7 @@ verify_ssh_permissions() {
     fi
 }
 
-# Функция получения пути к SSH директории (БЕЗ ЛОГИРОВАНИЯ В ВЫВОДЕ)
+# Функция получения пути к SSH директории
 get_ssh_directory() {
     local username=$(trim "$1")
     local home_dir=""
@@ -294,7 +294,194 @@ manage_ssh_keys() {
     fi
 }
 
-# Остальные функции остаются без изменений (check_os, check_root, update_system, install_ssh, select_user, create_user, change_ssh_port, install_fail2ban, setup_ufw)
+# Проверка ОС
+check_os() {
+    log "Проверка версии Ubuntu..."
+    if [ ! -f /etc/os-release ]; then
+        error_exit "Это не Ubuntu"
+    fi
+    source /etc/os-release
+    if [ "$NAME" != "Ubuntu" ]; then
+        error_exit "ОС не является Ubuntu"
+    fi
+    VERSION=${VERSION_ID%%.*}
+    if [ "$VERSION" -lt 22 ]; then
+        error_exit "Требуется Ubuntu 22.04 или новее"
+    fi
+    log "Найдена Ubuntu версии $VERSION_ID"
+}
+
+# Проверка прав root
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        error_exit "Скрипт должен быть запущен от root"
+    fi
+    log "Скрипт запущен от root"
+}
+
+# Обновление системы
+update_system() {
+    log "Обновление пакетов..."
+    apt-get update -q >> "$LOG_FILE" 2>&1 || error_exit "Ошибка apt-get update"
+    apt-get upgrade -y -q >> "$LOG_FILE" 2>&1 || error_exit "Ошибка apt-get upgrade"
+    log "Система обновлена"
+}
+
+# Установка SSH
+install_ssh() {
+    if ! dpkg -l | grep -q openssh-server; then
+        log "Установка SSH сервера..."
+        apt-get install -y -q openssh-server >> "$LOG_FILE" 2>&1 || error_exit "Ошибка установки SSH"
+        log "SSH установлен"
+    else
+        log "SSH сервер уже установлен"
+    fi
+}
+
+# Создание пользователя
+create_user() {
+    while true; do
+        read -rp "Введите имя нового пользователя: " username
+        username=$(trim "$username")
+        if [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            if id -u "$username" >/dev/null 2>&1; then
+                echo "Пользователь уже существует"
+            else
+                adduser --gecos "" --disabled-password "$username" >> "$LOG_FILE" 2>&1
+                usermod -aG sudo "$username"
+                USERNAME="$username"
+                
+                # Создаем и настраиваем .ssh директорию
+                setup_ssh_directory "$USERNAME"
+                
+                break
+            fi
+        else
+            echo "Невалидное имя пользователя. Используйте только строчные латинские буквы, цифры, дефисы и подчеркивания"
+        fi
+    done
+}
+
+# Выбор пользователя
+select_user() {
+    # Получаем пользователей с sudo правами
+    local sudo_users=()
+    while IFS= read -r user; do
+        if [ -n "$user" ] && [ "$user" != "root" ]; then
+            sudo_users+=("$user")
+        fi
+    done < <(getent passwd | awk -F: '$3 >= 1000 && $3 <= 60000 {print $1}' | xargs -n1 groups 2>/dev/null | grep sudo | cut -d: -f1 | sort -u)
+    
+    if [ ${#sudo_users[@]} -gt 0 ]; then
+        echo "Найдены пользователи с sudo:"
+        for i in "${!sudo_users[@]}"; do
+            echo "$((i+1)). ${sudo_users[$i]}"
+        done
+        echo "$(( ${#sudo_users[@]} + 1 )). Создать нового пользователя"
+        
+        while true; do
+            read -rp "Выберите пользователя: " choice
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le $((${#sudo_users[@]} + 1)) ]; then
+                if [ "$choice" -le ${#sudo_users[@]} ]; then
+                    USERNAME=$(trim "${sudo_users[$((choice-1))]}")
+                    break
+                else
+                    create_user
+                    break
+                fi
+            else
+                echo "Неверный выбор. Введите число от 1 до $((${#sudo_users[@]} + 1))"
+            fi
+        done
+    else
+        echo "Пользователей с sudo не найдено, создаем нового"
+        create_user
+    fi
+    log "Выбран пользователь: $USERNAME"
+}
+
+# Смена порта SSH
+change_ssh_port() {
+    while true; do
+        read -rp "Введите новый порт SSH (1024-65535): " port
+        port=$(trim "$port")
+        if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ]; then
+            # Проверяем, не занят ли порт
+            if netstat -tuln | grep -q ":$port "; then
+                echo "Порт $port уже занят. Выберите другой порт."
+                continue
+            fi
+            
+            SSHD_PORT="$port"
+            
+            # Создаем новую конфигурацию SSH
+            create_ssh_config "$SSHD_PORT" "$USERNAME"
+            
+            # Перезагружаем SSH сервер
+            systemctl restart ssh
+            log "SSH порт изменен на $SSHD_PORT и сервис перезагружен"
+            break
+        else
+            echo "Неверный порт. Должен быть числом от 1024 до 65535"
+        fi
+    done
+}
+
+# Установка fail2ban
+install_fail2ban() {
+    if ! dpkg -l | grep -q fail2ban; then
+        log "Установка fail2ban..."
+        apt-get install -y -q fail2ban >> "$LOG_FILE" 2>&1
+    fi
+    
+    # Создаем конфигурацию
+    cat > /etc/fail2ban/jail.local << EOF
+[sshd]
+enabled = true
+port = $SSHD_PORT
+logpath = %(sshd_log)s
+maxretry = 3
+findtime = 600
+bantime = 600
+EOF
+    
+    systemctl restart fail2ban
+    log "Fail2ban настроен для порта $SSHD_PORT"
+}
+
+# Настройка UFW
+setup_ufw() {
+    if ! dpkg -l | grep -q ufw; then
+        log "Установка UFW..."
+        apt-get install -y -q ufw >> "$LOG_FILE" 2>&1
+    fi
+    
+    # Сброс правил
+    ufw --force reset >> "$LOG_FILE" 2>&1
+    
+    # Разрешаем необходимые порты
+    ufw allow 80/tcp >> "$LOG_FILE" 2>&1
+    ufw allow 443/tcp >> "$LOG_FILE" 2>&1
+    ufw allow "$SSHD_PORT/tcp" >> "$LOG_FILE" 2>&1
+    
+    # Включаем UFW
+    ufw --force enable >> "$LOG_FILE" 2>&1
+    log "UFW настроен с портами 80, 443 и $SSHD_PORT"
+    
+    # Даем время для проверки
+    echo "Проверьте подключение по SSH к порту $SSHD_PORT"
+    echo "У вас есть 60 секунд для проверки перед закрытием порта 22..."
+    sleep 60
+    
+    # Закрываем порт 22
+    ufw delete allow 22/tcp >> "$LOG_FILE" 2>&1
+    
+    # Перезагружаем службы
+    systemctl restart ssh
+    systemctl restart fail2ban
+    
+    log "Порт 22 закрыт, службы перезагружены"
+}
 
 # Основная функция
 main() {
@@ -313,6 +500,7 @@ main() {
     echo "Пользователь: $USERNAME"
     echo "IP: $IP"
     echo "Порт SSH: $SSHD_PORT"
+    echo "Лог файл: $LOG_FILE"
     log "Настройка успешно завершена для $USERNAME на $IP:$SSHD_PORT"
 }
 
