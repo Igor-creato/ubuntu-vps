@@ -6,7 +6,7 @@
 #   --key-file <path>        путь к публичному ключу (OpenSSH или SSH2/RFC4716)
 #   --nopasswd-sudo          дать sudo без пароля (повышенный риск)
 #   --non-interactive        ошибаться вместо вопросов
-#   --port-only              пропустить создание/ключи; сменить только порт (USERNAME обязателен или берётся последний созданный)
+#   --port-only              только сменить порт (USERNAME обязателен или берётся последний созданный)
 
 set -Eeuo pipefail
 shopt -s extglob
@@ -203,10 +203,10 @@ setup_ssh_keys() {
 
   # пути
   local home_dir; home_dir="$(getent passwd "$user" | cut -d: -f6)"
-  [[ -d "$home_dir" ]] || { print_err "Домашний каталог не найден: $home_dir"; exit 1; }
+  [[ -д "$home_dir" ]] || { print_err "Домашний каталог не найден: $home_dir"; exit 1; }
 
   install -d -m 0700 -o "$user" -g "$user" "$home_dir/.ssh"
-  install -m 0600 -o "$user" -g "$user" /dev/null "$home_dir/.ssh/authorized_keys"
+  install -m 0600 -о "$user" -g "$user" /dev/null "$home_dir/.ssh/authorized_keys"
 
   # -- выбор источника ключей --
   local root_auth="/root/.ssh/authorized_keys"
@@ -216,6 +216,7 @@ setup_ssh_keys() {
 
   local choice=""
   if [[ "$have_root_keys" == "yes" ]]; then
+    # Меню: 1) Перенести  2) Вставить  3) Сгенерировать
     if [[ -n "$key_file" && -r "$key_file" ]]; then
       choice="2"
     elif $NONINTERACTIVE; then
@@ -228,8 +229,9 @@ setup_ssh_keys() {
       read -rp "[?] Вариант [1/2/3]: " choice
     fi
   else
+    # Меню: 1) Вставить  2) Сгенерировать  —> корректное сопоставление!
     if [[ -n "$key_file" && -r "$key_file" ]]; then
-      choice="2"
+      choice="2"  # используем вставку из файла
     elif $NONINTERACTIVE; then
       print_err "У root ключей нет, а --key-file не задан (NONINTERACTIVE)."; exit 1
     else
@@ -237,7 +239,8 @@ setup_ssh_keys() {
       echo "  1) Вставить/передать свой публичный ключ(и)"
       echo "  2) Сгенерировать новый ключ (ed25519) для $user"
       read -rp "[?] Вариант [1/2]: " choice
-      [[ "$choice" == "2" ]] && choice="3"
+      # ремап: 1 -> "вставить" (код 2), 2 -> "генерация" (код 3)
+      if [[ "$choice" == "1" ]]; then choice="2"; else choice="3"; fi
     fi
   fi
 
@@ -248,10 +251,8 @@ setup_ssh_keys() {
 
   # --- заполняем кандидатов согласно выбору ---
   case "$choice" in
-    1)
-      if [[ -r "$root_auth" ]]; then
-        cat "$root_auth" >> "$tmp_candidates" || true
-      fi
+    1) # перенос из root
+      if [[ -r "$root_auth" ]]; then cat "$root_auth" >> "$tmp_candidates" || true; fi
       (
         shopt -s nullglob
         for f in /root/.ssh/*.pub; do
@@ -259,7 +260,7 @@ setup_ssh_keys() {
         done
       )
       ;;
-    2)
+    2) # вставка
       if [[ -n "$key_file" ]]; then
         [[ -r "$key_file" ]] || { print_err "Файл ключей недоступен: $key_file"; exit 1; }
         cat "$key_file" >> "$tmp_candidates"
@@ -269,7 +270,7 @@ setup_ssh_keys() {
         cat >> "$tmp_candidates"
       fi
       ;;
-    3)
+    3) # генерация
       print_info "Генерация ed25519 ключа для $user…"
       su - "$user" -c "ssh-keygen -t ed25519 -a 100 -N '' -f ~/.ssh/id_ed25519 >/dev/null"
       cat "$home_dir/.ssh/id_ed25519.pub" >> "$tmp_candidates"
@@ -288,11 +289,10 @@ setup_ssh_keys() {
   after="$(grep -Ec '^(ssh-|ecdsa-|sk-)' "$tmp_merged" 2>/dev/null || true)";  after="$(num_or_zero "$after")"
   added_count=$(( after - before )); (( added_count < 0 )) && added_count=0
 
-  # === КРИТИЧЕСКИЙ СТОП ===
+  # === КРИТИЧЕСКИЙ СТОП, если ключей нет ===
   if (( after == 0 )); then
     print_err "У пользователя '$user' нет ни одного валидного публичного ключа. Настройка SSH прервана, изменений в sshd/ufw/fail2ban не сделано.
 Совет: укажи --key-file /path/to/key.pub, вставь ключи вручную, либо выбери генерацию ключа (вариант 3)."
-    # Чистку ключей root НЕ делаем
     rm -f "$tmp_existing" "$tmp_candidates" "$tmp_merged"
     exit 1
   fi
@@ -303,7 +303,7 @@ setup_ssh_keys() {
   print_ok "Добавлено ключей: ${added_count}"
   print_info "Всего ключей у $user: ${after}"
 
-  # Очистка ключей у root (с бэкапом) — ТОЛЬКО если у пользователя теперь есть ключи
+  # Очистка ключей у root (с бэкапом) — только если успех
   if [[ -f "$root_auth" ]]; then
     local ts backup; ts="$(date +%Y%m%d-%H%M%S)"; backup="/root/authorized_keys.root.backup.$ts"
     cp -a "$root_auth" "$backup" || true
@@ -311,7 +311,6 @@ setup_ssh_keys() {
     print_ok "Ключи у root очищены. Бэкап: $backup"
   fi
 
-  # уборка tmp
   rm -f "$tmp_existing" "$tmp_candidates" "$tmp_merged"
 
   USERNAME="$user"; export USERNAME
@@ -324,9 +323,7 @@ else
   if [[ -z "${USERNAME:-}" ]]; then
     USERNAME="$(awk -F: '($3>=1000)&&($1!="nobody"){print $1":"$3}' /etc/passwd | sort -t: -k2,2n | tail -1 | cut -d: -f1 || true)"
   fi
-  if [[ -n "${USERNAME:-}" && "$(id -u "$USERNAME" 2>/dev/null || echo)" ]]; then
-    : # ok
-  else
+  if [[ -n "${USERNAME:-}" && "$(id -u "$USERNAME" 2>/dev/null || echo)" ]]; then :; else
     print_warn "USERNAME не задан или не существует — пропущу AllowUsers."
   fi
 fi
@@ -334,7 +331,7 @@ fi
 # ---------- Смена порта и жёсткие опции SSH ----------
 OLD_PORT="$(current_ssh_port)"
 
-if [[ -z "$NEW_PORT" ]]; then
+if [[ -з "$NEW_PORT" ]]; then
   if $NONINTERACTIVE; then print_err "В non-interactive требуется --port"; exit 1; fi
   while :; do
     read -rp "Введите новый порт SSH (1024-65535): " NEW_PORT
