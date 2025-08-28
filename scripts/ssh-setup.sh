@@ -46,7 +46,7 @@ done
 # ---------- Вспомогательные ----------
 is_valid_username() { [[ "$1" =~ ^[a-z_][a-z0-9._-]{0,31}$ ]]; }
 is_valid_port()     { local p="$1"; [[ "$p" =~ ^[0-9]+$ ]] && (( p>=1024 && p<=65535 )); }
-port_is_free()      { local p="$1"; command -v ss >/dev/null && ! ss -Htlpn 2>/dev/null | grep -E "[:\]]${p}\b" >/dev/null; }
+port_is_free()      { local p="$1"; if command -v ss >/dev/null 2>&1; then ! ss -Htlpn 2>/dev/null | grep -E "[:\]]${p}\b" >/dev/null; else true; fi; }
 
 backup_file() {
   local f="$1"
@@ -114,7 +114,7 @@ setup_ssh_keys() {
   # -- выбор/создание пользователя --
   if [[ -z "$user" ]]; then
     local last_user
-    last_user="$(awk -F: '($3>=1000)&&($1!="nobody"){print $1":"$3}' /etc/passwd | sort -t: -k2,2n | tail -1 | cut -d: -f1)"
+    last_user="$(awk -F: '($3>=1000)&&($1!="nobody"){print $1":"$3}' /etc/passwd | sort -t: -k2,2n | tail -1 | cut -d: -f1 || true)"
     if [[ -n "$last_user" ]]; then
       if $NONINTERACTIVE; then
         user="$last_user"; print_info "NONINTERACTIVE: использую пользователя: $user"
@@ -172,20 +172,21 @@ setup_ssh_keys() {
   chmod 440 "/etc/sudoers.d/$user"
   id -nG "$user" | grep -qw sudo || usermod -aG sudo "$user"
 
-  # ключи
+  # пути
   local home_dir; home_dir="$(getent passwd "$user" | cut -d: -f6)"
   [[ -d "$home_dir" ]] || { print_err "Домашний каталог не найден: $home_dir"; exit 1; }
 
   install -d -m 0700 -o "$user" -g "$user" "$home_dir/.ssh"
   install -m 0600 -o "$user" -g "$user" /dev/null "$home_dir/.ssh/authorized_keys"
 
-  local ROOT_AUTH="/root/.ssh/authorized_keys"
-  local have_root=false
-  [[ -s "$ROOT_AUTH" ]] && have_root=true
-  compgen -G "/root/.ssh/*.pub" >/dev/null 2>&1 && have_root=true
+  # -- выбор источника ключей --
+  local root_auth="/root/.ssh/authorized_keys"
+  local have_root_keys="no"
+  if [[ -s "$root_auth" ]]; then have_root_keys="yes"; fi
+  if compgen -G "/root/.ssh/"'*.pub' >/dev/null 2>&1; then have_root_keys="yes"; fi
 
   local choice=""
-  if $have_root; then
+  if [[ "$have_root_keys" == "yes" ]]; then
     if [[ -n "$key_file" && -r "$key_file" ]]; then
       choice="2"
     elif $NONINTERACTIVE; then
@@ -194,7 +195,7 @@ setup_ssh_keys() {
       echo "Выберите действие:"
       echo "  1) Перенести ключи root пользователю $user"
       echo "  2) Вставить/передать свой публичный ключ(и)"
-      echo "  3) Сгенерировать новый ключ (ед25519) для $user"
+      echo "  3) Сгенерировать новый ключ (ed25519) для $user"
       read -rp "[?] Вариант [1/2/3]: " choice
     fi
   else
@@ -205,85 +206,97 @@ setup_ssh_keys() {
     else
       echo "Ключей у root не найдено. Выберите:"
       echo "  1) Вставить/передать свой публичный ключ(и)"
-      echo "  2) Сгенерировать новый ключ (ед25519) для $user"
+      echo "  2) Сгенерировать новый ключ (ed25519) для $user"
       read -rp "[?] Вариант [1/2]: " choice
       [[ "$choice" == "2" ]] && choice="3"
     fi
   fi
 
-  local tmp; tmp="$(mktemp)"
-  ( cat "$home_dir/.ssh/authorized_keys" 2>/dev/null || true ) >"$tmp"
+  # --- подготовим временные файлы ---
+  local tmp_existing tmp_candidates tmp_merged
+  tmp_existing="$(mktemp)"; tmp_candidates="$(mktemp)"; tmp_merged="$(mktemp)"
+  # существующие ключи пользователя
+  cat "$home_dir/.ssh/authorized_keys" > "$tmp_existing" || true
 
-  add_lines() {
-    local line; local added_local=0
-    while IFS= read -r line; do
-      line="${line//$'\r'/}"
-      line="${line#"${line%%[![:space:]]*}"}"
-      line="${line%"${line##*[![:space:]]}"}"
-      [[ -z "$line" || "$line" == \#* ]] && continue
-      [[ "$line" =~ ^(ssh-|ecdsa-|sk-) ]] || { print_warn "Строка не похожа на SSH-ключ: ${line:0:50}..."; continue; }
-      if ! grep -qxF "$line" "$tmp" 2>/dev/null; then
-        printf "%s\n" "$line" >>"$tmp"; ((added_local++))
-      fi
-    done
-    echo "$added_local"
+  # — функции фильтрации и дедупа —
+  filter_keys() {
+    # stdin -> stdout: обрезать пробелы, убрать комментарии/пустые строки, оставить валидные префиксы
+    awk '
+      {
+        gsub(/\r/,"");
+        sub(/^[[:space:]]+/,""); sub(/[[:space:]]+$/,"");
+        if ($0 ~ /^#/ || $0 == "") next;
+        if ($0 ~ /^(ssh-|ecdsa-|sk-)/) print $0;
+      }'
+  }
+  merge_unique() {
+    # stdin (много файлов) -> stdout: сохранить первый порядок, убрать дубли
+    awk '!seen[$0]++'
   }
 
-  local added=0
+  # --- заполняем кандидаты согласно выбору ---
   case "$choice" in
     1)
-      # перенос из authorized_keys
-      if [[ -s "$ROOT_AUTH" ]]; then
-        local count=0
-        count="$(add_lines < "$ROOT_AUTH" || echo 0)"; count="${count:-0}"
-        ((added+=count))
+      # перенос из root
+      if [[ -r "$root_auth" ]]; then
+        cat "$root_auth" >> "$tmp_candidates" || true
       fi
-      # перенос из всех .pub без пайпов
-      if compgen -G "/root/.ssh/*.pub" >/dev/null 2>&1; then
-        local f this=0
+      (
+        shopt -s nullglob
         for f in /root/.ssh/*.pub; do
-          [[ -r "$f" ]] || continue
-          this="$(add_lines < "$f" || echo 0)"; this="${this:-0}"
-          ((added+=this))
+          [[ -r "$f" ]] && cat "$f" >> "$tmp_candidates"
         done
-      fi
+      )
       ;;
     2)
       if [[ -n "$key_file" ]]; then
         [[ -r "$key_file" ]] || { print_err "Файл ключей недоступен: $key_file"; exit 1; }
-        local count=0
-        count="$(add_lines < "$key_file" || echo 0)"; count="${count:-0}"
-        ((added+=count))
+        cat "$key_file" >> "$tmp_candidates"
       else
         print_info "Вставьте PUBLIC ключи (OpenSSH), по одному в строке. Завершите ввод Ctrl+D."
         echo "---"
-        local count=0
-        count="$(add_lines || echo 0)"; count="${count:-0}"
-        ((added+=count))
+        # читаем произвольное количество строк в файл-кандидат
+        cat >> "$tmp_candidates"
       fi
       ;;
     3)
       print_info "Генерация ed25519 ключа для $user…"
       su - "$user" -c "ssh-keygen -t ed25519 -a 100 -N '' -f ~/.ssh/id_ed25519 >/dev/null"
-      local count=0
-      count="$(add_lines < "$home_dir/.ssh/id_ed25519.pub" || echo 0)"; count="${count:-0}"
-      ((added+=count))
+      cat "$home_dir/.ssh/id_ed25519.pub" >> "$tmp_candidates"
       ;;
-    *) print_err "Некорректный выбор ключей."; exit 1;;
+    *) print_err "Некорректный выбор."; exit 1;;
   esac
 
-  chown "$user:$user" "$tmp"; chmod 600 "$tmp"
-  mv -f "$tmp" "$home_dir/.ssh/authorized_keys"
-  print_ok "Добавлено ключей: $added"
-  print_info "Всего ключей у $user: $(grep -c '^\(ssh-\|ecdsa-\|sk-\)' "$home_dir/.ssh/authorized_keys" 2>/dev/null || echo 0)"
+  # — фильтруем кандидатов —
+  filter_keys < "$tmp_candidates" > "${tmp_candidates}.clean"
+  mv -f "${tmp_candidates}.clean" "$tmp_candidates"
+
+  # — формируем объединённый список и считаем добавленные —
+  local before after added_count
+  before="$(grep -Ec '^(ssh-|ecdsa-|sk-)' "$tmp_existing" || true)"
+  cat "$tmp_existing" "$tmp_candidates" | filter_keys | merge_unique > "$tmp_merged"
+  after="$(grep -Ec '^(ssh-|ecdsa-|sk-)' "$tmp_merged" || true)"
+  if [[ -z "$before" ]]; then before=0; fi
+  if [[ -z "$after"  ]]; then after=0; fi
+  added_count=$(( after - before ))
+  (( added_count < 0 )) && added_count=0
+
+  # — атомарно кладём authorized_keys —
+  install -m 0600 -o "$user" -g "$user" "$tmp_merged" "$home_dir/.ssh/authorized_keys"
+
+  print_ok "Добавлено ключей: ${added_count}"
+  print_info "Всего ключей у $user: ${after}"
 
   # Очистка ключей у root (с бэкапом)
-  if [[ -f "$ROOT_AUTH" ]]; then
+  if [[ -f "$root_auth" ]]; then
     local ts backup; ts="$(date +%Y%m%d-%H%M%S)"; backup="/root/authorized_keys.root.backup.$ts"
-    cp -a "$ROOT_AUTH" "$backup" || true
-    : > "$ROOT_AUTH"; chmod 600 "$ROOT_AUTH"; chown root:root "$ROOT_AUTH"
+    cp -a "$root_auth" "$backup" || true
+    : > "$root_auth"; chmod 600 "$root_auth"; chown root:root "$root_auth"
     print_ok "Ключи у root очищены. Бэкап: $backup"
   fi
+
+  # уборка tmp
+  rm -f "$tmp_existing" "$tmp_candidates" "$tmp_merged"
 
   USERNAME="$user"; export USERNAME
   print_ok "Готово. Пользователь: $user"
@@ -295,7 +308,11 @@ else
   if [[ -z "${USERNAME:-}" ]]; then
     USERNAME="$(awk -F: '($3>=1000)&&($1!="nobody"){print $1":"$3}' /etc/passwd | sort -t: -k2,2n | tail -1 | cut -d: -f1 || true)"
   fi
-  [[ -n "${USERNAME:-}" && -n "$(id -u "$USERNAME" 2>/dev/null || echo)" ]] || print_warn "USERNAME не задан или не существует — пропущу AllowUsers."
+  if [[ -n "${USERNAME:-}" && "$(id -u "$USERNAME" 2>/dev/null || echo)" ]]; then
+    : # ok
+  else
+    print_warn "USERNAME не задан или не существует — пропущу AllowUsers."
+  fi
 fi
 
 # ---------- Смена порта и жёсткие опции SSH ----------
@@ -350,10 +367,10 @@ JAIL_LOCAL="/etc/fail2ban/jail.local"
 backup_file "$JAIL_LOCAL"
 cat >"$JAIL_LOCAL" <<EOF
 [sshd]
-enabled = true
-port    = ${NEW_PORT}
-logpath = %(sshd_log)s
-backend = systemd
+enabled  = true
+port     = ${NEW_PORT}
+logpath  = %(sshd_log)s
+backend  = systemd
 maxretry = 5
 findtime = 10m
 bantime  = 1h
