@@ -14,6 +14,15 @@ error_exit() {
     exit 1
 }
 
+# Функция для удаления лишних пробелов
+trim() {
+    local var="$*"
+    # Удаляем все пробелы в начале и конце строки
+    var="${var#"${var%%[![:space:]]*}"}"
+    var="${var%"${var##*[![:space:]]}"}"
+    printf '%s' "$var"
+}
+
 # Проверка ОС
 check_os() {
     log "Проверка версии Ubuntu..."
@@ -69,7 +78,7 @@ select_user() {
             read -rp "Выберите пользователя: " choice
             if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le $((${#sudo_users[@]} + 1)) ]; then
                 if [ "$choice" -le ${#sudo_users[@]} ]; then
-                    USERNAME="${sudo_users[$((choice-1))]}"
+                    USERNAME=$(trim "${sudo_users[$((choice-1))]}")
                     break
                 else
                     create_user
@@ -87,6 +96,7 @@ select_user() {
 create_user() {
     while true; do
         read -rp "Введите имя нового пользователя: " username
+        username=$(trim "$username")
         if [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
             if id -u "$username" >/dev/null 2>&1; then
                 echo "Пользователь уже существует"
@@ -220,6 +230,7 @@ add_ssh_key() {
 change_ssh_port() {
     while true; do
         read -rp "Введите новый порт SSH: " port
+        port=$(trim "$port")
         if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ]; then
             # Создаем backup конфигурации
             cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
@@ -277,6 +288,7 @@ setup_ufw() {
     # Проверка подключения
     while true; do
         read -rp "Проверьте подключение по SSH к порту $SSHD_PORT. Успешно? (y/n): " confirm
+        confirm=$(trim "$confirm")
         case $confirm in
             y|Y)
                 # Закрываем порт 22 и отключаем парольную аутентификацию
