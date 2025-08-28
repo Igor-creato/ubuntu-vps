@@ -137,76 +137,75 @@ fi
 # ----------------------------
 setup_ssh_keys() {
   local user="$1" home_dir="/home/$user"
+
   install -d -m 700 -o "$user" -g "$user" "$home_dir/.ssh"
   touch "$home_dir/.ssh/authorized_keys"
   chown "$user:$user" "$home_dir/.ssh/authorized_keys"
   chmod 600 "$home_dir/.ssh/authorized_keys"
 
-  # Собираем кандидатов ключей
-  local tmpkeys tmpfile
-  tmpkeys="$(mktemp)"
-  tmpfile="$(mktemp)"
-
-  # Если передали явный файл ключа
-  if [[ -n "${KEY_FILE:-}" ]]; then
+  local pubkey=""
+  if [[ -n "$KEY_FILE" ]]; then
     if [[ -f "$KEY_FILE" ]]; then
-      cat "$KEY_FILE" >>"$tmpkeys"
+      pubkey="$(cat "$KEY_FILE")"
     else
-      print_err "Файл ключа не найден: $KEY_FILE"; rm -f "$tmpkeys" "$tmpfile"; exit 1
+      print_err "Файл ключа не найден: $KEY_FILE"
+      exit 1
     fi
+  else
+    # Пытаемся взять все ключи из root
+    for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub /root/.ssh/authorized_keys; do
+      if [[ -f "$f" ]]; then
+        pubkey="$(cat "$f")"
+        break
+      fi
+    done
   fi
 
-  # *.pub и authorized_keys из /root/.ssh (если есть)
-  if [[ -d /root/.ssh ]]; then
-    cat /root/.ssh/*.pub 2>/dev/null >>"$tmpkeys" || true
-    [[ -f /root/.ssh/authorized_keys ]] && cat /root/.ssh/authorized_keys >>"$tmpkeys"
-  fi
-
-  # Оставляем только строки публичных ключей (ssh-ed25519, ssh-rsa, ecdsa и т.п.), убираем пустые и дубликаты
-  awk '/^ssh-(ed25519|rsa|ecdsa)/ && NF>1 {print}' "$tmpkeys" | sort -u >"$tmpfile"
-
-  # Если ключей так и нет — интерактивно спросим/сгенерируем как раньше
-  if [[ ! -s "$tmpfile" ]]; then
+  if [[ -z "${pubkey}" ]]; then
     if $NONINTERACTIVE; then
-      print_err "Публичные ключи не найдены. Укажите --key-file или запустите без --non-interactive."
-      rm -f "$tmpkeys" "$tmpfile"; exit 1
+      print_err "Публичный ключ не найден. Задайте --key-file или используйте режим без интерактива."
+      exit 1
     fi
-    print_info "Публичные ключи не найдены."
+    print_info "Публичный ключ не найден."
     echo "1) Ввести свой ключ"
     echo "2) Сгенерировать новый ed25519"
     while true; do
       read -r -p "Ваш выбор (1/2): " ch
       case "$ch" in
         1)
-          print_info "Вставьте PUBLIC key (OpenSSH, одна строка), затем Ctrl+D:"
-          cat >"$tmpfile"
-          awk '/^ssh-(ed25519|rsa|ecdsa)/ && NF>1 {print}' "$tmpfile" | sed -n '1p' >"$tmpkeys"
-          mv "$tmpkeys" "$tmpfile"
-          [[ -s "$tmpfile" ]] && break
+          print_info "Вставьте PUBLIC key (OpenSSH, одна строка на ключ), затем Ctrl+D:"
+          pubkey="$(cat)"
+          [[ -n "$pubkey" ]] && break
           print_err "Ключ пустой или неверного формата";;
         2)
           install -d -m 700 -o root -g root /root/.ssh
           local name="${user}_ed25519"
           ssh-keygen -t ed25519 -f "/root/.ssh/${name}" -N "" -C "${user}@$(hostname)"
-          cat "/root/.ssh/${name}.pub" >"$tmpfile"
-          print_ok "Сгенерирован ключ. Приватный: /root/.ssh/${name}"
+          pubkey="$(cat "/root/.ssh/${name}.pub")"
+          print_ok "Сгенерирован ключ. Приватный ключ: /root/.ssh/${name}  (НЕ публикуйте его!)."
           break;;
         *) print_err "Выберите 1 или 2";;
       esac
     done
   fi
 
-  # Добавляем уникально к существующим ключам пользователя
-  if [[ -s "$home_dir/.ssh/authorized_keys" ]]; then
-    cat "$home_dir/.ssh/authorized_keys" >>"$tmpfile"
-    awk '/^ssh-(ed25519|rsa|ecdsa)/ && NF>1 {print}' "$tmpfile" | sort -u >"$tmpkeys"
-    mv "$tmpkeys" "$tmpfile"
-  fi
+  # Добавляем все ключи построчно, если их ещё нет
+  local tmpfile
+  tmpfile="$(mktemp)"
+  cat "$home_dir/.ssh/authorized_keys" > "$tmpfile"
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if ! grep -qxF "$line" "$tmpfile"; then
+      echo "$line" >> "$tmpfile"
+    fi
+  done <<< "$pubkey"
 
   install -m 600 -o "$user" -g "$user" "$tmpfile" "$home_dir/.ssh/authorized_keys"
-  rm -f "$tmpkeys" "$tmpfile"
-  print_ok "Публичные ключи установлены пользователю $user."
+  rm -f "$tmpfile"
+  print_ok "Публичный ключ(и) установлен(ы) пользователю $user."
 }
+
 
 
 if ! $PORT_ONLY; then
