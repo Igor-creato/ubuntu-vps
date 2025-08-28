@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # ssh-setup.sh
 # Безопасная настройка SSH: создание пользователя/ключей, смена порта, UFW и fail2ban.
-# Поддерживает неинтерактивные флаги:
+# Флаги:
 #   --user <name>            имя пользователя (если не задано — интерактивно)
 #   --port <num>             порт SSH (1024-65535)
 #   --key-file <path>        путь к публичному ключу (OpenSSH формат)
 #   --nopasswd-sudo          выдать пользователю sudo без пароля (повышенный риск)
 #   --non-interactive        ошибаться вместо вопросов
-#   --port-only              пропустить создание/ключи, сменить только порт для существующего пользователя (спросит имя, если нет --user)
+#   --port-only              пропустить создание/ключи; сменить только порт. USERNAME обязателен или будет выбран последний созданный.
 
 set -euo pipefail
-
-: "${user:=${username:-${USERNAME:-}}}"
 
 # ----------------------------
 # Общие функции и проверки
@@ -32,7 +30,7 @@ fi
 # ----------------------------
 # Парсинг аргументов
 # ----------------------------
-USERNAME=""
+USERNAME="${user:-${username:-${USERNAME:-}}}"
 NEW_PORT=""
 KEY_FILE=""
 NOPASSWD_SUDO=false
@@ -41,12 +39,12 @@ PORT_ONLY=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --user)           USERNAME="${2:-}"; shift 2;;
-    --port)           NEW_PORT="${2:-}"; shift 2;;
-    --key-file)       KEY_FILE="${2:-}"; shift 2;;
-    --nopasswd-sudo)  NOPASSWD_SUDO=true; shift 1;;
-    --non-interactive)NONINTERACTIVE=true; shift 1;;
-    --port-only)      PORT_ONLY=true; shift 1;;
+    --user)            USERNAME="${2:-}"; shift 2;;
+    --port)            NEW_PORT="${2:-}"; shift 2;;
+    --key-file)        KEY_FILE="${2:-}"; shift 2;;
+    --nopasswd-sudo)   NOPASSWD_SUDO=true; shift 1;;
+    --non-interactive) NONINTERACTIVE=true; shift 1;;
+    --port-only)       PORT_ONLY=true; shift 1;;
     *) print_err "Неизвестный аргумент: $1"; exit 1;;
   esac
 done
@@ -65,20 +63,7 @@ is_valid_port() {
 
 port_is_free() {
   local p="$1"
-  # Проверяем LISTEN через ss; матчим по границе (:PORT и ]:PORT для IPv6)
   ! ss -Htlpn | grep -E "[:\]]${p}\b" >/dev/null 2>&1
-}
-
-require_value() {
-  local name="$1" value="$2"
-  if [[ -z "$value" ]]; then
-    if $NONINTERACTIVE; then
-      print_err "Требуется параметр: $name"
-      exit 1
-    else
-      return 1
-    fi
-  fi
 }
 
 # ----------------------------
@@ -98,48 +83,13 @@ apt-get -y autoclean
 systemctl enable ssh --now
 
 # ----------------------------
-# Пользователь
-# ----------------------------
-if $PORT_ONLY; then
-  # Только смена порта; нужен существующий пользователь для AllowUsers
-  if ! require_value "--user" "$USERNAME"; then
-    read -r -p "Введите имя существующего пользователя: " USERNAME
-  fi
-  if ! id "$USERNAME" &>/dev/null; then
-    print_err "Пользователь '$USERNAME' не найден"
-    exit 1
-  fi
-else
-  if ! require_value "--user" "$USERNAME"; then
-    read -r -p "Введите имя нового пользователя: " USERNAME
-  fi
-  while ! is_valid_username "$USERNAME" || id "$USERNAME" &>/dev/null; do
-    print_err "Неверное имя или пользователь уже существует"
-    if $NONINTERACTIVE; then exit 1; fi
-    read -r -p "Введите имя нового пользователя: " USERNAME
-  done
-
-  print_info "Создание пользователя '$USERNAME'..."
-  adduser --disabled-password --gecos "" "$USERNAME"
-  usermod -aG sudo "$USERNAME"
-
-  if $NOPASSWD_SUDO; then
-    echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$USERNAME"
-  else
-    echo "$USERNAME ALL=(ALL) ALL" > "/etc/sudoers.d/$USERNAME"
-  fi
-  chmod 440 "/etc/sudoers.d/$USERNAME"
-  print_ok "Пользователь создан и добавлен в sudo."
-fi
-
-# ----------------------------
-# Ключи SSH
+# Ключи SSH и пользователь
 # ----------------------------
 # setup_ssh_keys <username?>
 # Если <username> не передан:
 #   - найдёт "последнего созданного" пользователя (макс. UID >=1000)
 #   - предложит: 1) использовать его, 2) создать нового
-# Глобалы: NONINTERACTIVE=true/false, KEY_FILE=/path/to/key.pub
+# Использует глобалы: NONINTERACTIVE, KEY_FILE, NOPASSWD_SUDO
 setup_ssh_keys() {
   set -euo pipefail
   umask 077
@@ -148,16 +98,14 @@ setup_ssh_keys() {
   _ok()   { printf "\033[0;32m[OK]\033[0m %s\n"   "$*"; }
   _warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
   _err()  { printf "\033[0;31m[ERROR]\033[0m %s\n" "$*" >&2; }
-
   _is_valid_username() { [[ "$1" =~ ^[a-z_][a-z0-9._-]{0,31}$ ]]; }
 
-  local user="${1:-}"
+  local user="${1:-${USERNAME:-}}"
   local nonint="${NONINTERACTIVE:-false}"
   local key_file="${KEY_FILE:-}"
 
   # --- 0) Определяем пользователя ---
   if [[ -z "$user" ]]; then
-    # последний созданный = наибольший UID >=1000
     local last_user=""
     last_user="$(awk -F: '($3>=1000)&&($1!="nobody"){print $1":"$3}' /etc/passwd \
                  | sort -t: -k2,2n | tail -1 | cut -d: -f1)"
@@ -209,7 +157,7 @@ setup_ssh_keys() {
       done
     fi
   else
-    # user передан явно
+    # user передан явно — создать при необходимости
     if ! id "$user" &>/dev/null; then
       if [[ "$nonint" == "true" ]]; then
         _err "Пользователь '$user' не найден (NONINTERACTIVE)."
@@ -221,36 +169,30 @@ setup_ssh_keys() {
     fi
   fi
 
-  # убедиться, что в sudo
-  if ! id -nG "$user" | grep -qw sudo; then
-    if [[ "$nonint" == "true" ]]; then
-      _warn "Пользователь '$user' не в sudo (NONINTERACTIVE) — добавляю."
-      usermod -aG sudo "$user"
-    else
-      read -rp "[?] Пользователь '$user' не в sudo. Добавить? [y/N]: " yn
-      [[ "${yn,,}" == "y" ]] && usermod -aG sudo "$user"
-    fi
+  # выдача sudo NOPASSWD по флагу
+  if [[ "${NOPASSWD_SUDO:-false}" == "true" ]]; then
+    echo "$user ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$user"
+  else
+    echo "$user ALL=(ALL) ALL" > "/etc/sudoers.d/$user"
   fi
+  chmod 440 "/etc/sudoers.d/$user"
+
+  # убедиться, что в sudo
+  id -nG "$user" | grep -qw sudo || usermod -aG sudo "$user"
 
   # --- 1) ~/.ssh и authorized_keys ---
   local home_dir; home_dir="$(getent passwd "$user" | cut -d: -f6)"
   [[ -d "$home_dir" ]] || { _err "Домашний каталог не найден: $home_dir"; exit 1; }
 
-  mkdir -p "$home_dir/.ssh"
-  chmod 700 "$home_dir/.ssh"
-  chown "$user:$user" "$home_dir/.ssh"
-  touch "$home_dir/.ssh/authorized_keys"
-  chmod 600 "$home_dir/.ssh/authorized_keys"
-  chown "$user:$user" "$home_dir/.ssh/authorized_keys"
+  mkdir -p "$home_dir/.ssh"; chmod 700 "$home_dir/.ssh"; chown "$user:$user" "$home_dir/.ssh"
+  touch "$home_dir/.ssh/authorized_keys"; chmod 600 "$home_dir/.ssh/authorized_keys"; chown "$user:$user" "$home_dir/.ssh/authorized_keys"
 
   # --- 2) Источники ключей ---
   local ROOT_AUTH="/root/.ssh/authorized_keys"
   local root_has=false
   local src=""
   if [[ -s "$ROOT_AUTH" ]]; then
-    src="$(cat "$ROOT_AUTH")"
-    root_has=true
-    _info "Найдены ключи в $ROOT_AUTH"
+    src="$(cat "$ROOT_AUTH")"; root_has=true; _info "Найдены ключи в $ROOT_AUTH"
   fi
   if compgen -G "/root/.ssh/*.pub" >/dev/null 2>&1; then
     local pubs; pubs="$(cat /root/.ssh/*.pub 2>/dev/null || true)"
@@ -260,7 +202,7 @@ setup_ssh_keys() {
   # --- 3) Выбор сценария ---
   local choice=""
   if [[ "$root_has" == true ]]; then
-    if [[ -n "$key_file" && -r "$key_file" ]]; then
+    if [[ -n "${key_file}" && -r "${key_file}" ]]; then
       choice="2"
     elif [[ "$nonint" == "true" ]]; then
       choice="1"
@@ -272,7 +214,7 @@ setup_ssh_keys() {
       read -rp "[?] Вариант [1/2/3]: " choice
     fi
   else
-    if [[ -n "$key_file" && -r "$key_file" ]]; then
+    if [[ -n "${key_file}" && -r "${key_file}" ]]; then
       choice="2"
     elif [[ "$nonint" == "true" ]]; then
       _err "У root ключей нет, KEY_FILE не задан (NONINTERACTIVE)."
@@ -288,13 +230,11 @@ setup_ssh_keys() {
 
   # --- 4) Выполняем сценарий ---
   case "$choice" in
-    1)
-      [[ -n "$src" ]] || { _err "Нет ключей у root для переноса"; exit 1; }
-      ;;
+    1) [[ -n "$src" ]] || { _err "Нет ключей у root для переноса"; exit 1; } ;;
     2)
-      if [[ -n "$key_file" ]]; then
-        [[ -r "$key_file" ]] || { _err "Файл ключа недоступен: $key_file"; exit 1; }
-        src="$(cat "$key_file")"; _info "Ключи взяты из файла: $key_file"
+      if [[ -n "${key_file}" ]]; then
+        [[ -r "${key_file}" ]] || { _err "Файл ключа недоступен: ${key_file}"; exit 1; }
+        src="$(cat "${key_file}")"; _info "Ключи взяты из файла: ${key_file}"
       else
         _info "Вставьте PUBLIC ключи (OpenSSH), по одному в строке. Завершите ввод Ctrl+D."
         echo "---"
@@ -308,23 +248,19 @@ setup_ssh_keys() {
       src="$(cat "$home_dir/.ssh/id_ed25519.pub")"
       _ok "Сгенерирован ключ: $home_dir/.ssh/id_ed25519 (приватный)"
       ;;
-    *)
-      _err "Некорректный выбор."; exit 1;;
+    *) _err "Некорректный выбор."; exit 1;;
   esac
 
   [[ -n "$src" ]] || { _err "Ключи не получены."; exit 1; }
 
   # --- 5) Записываем authorized_keys безопасно (tmp + mv), фильтруем и дедуп ---
   local tmp; tmp="$(mktemp)"
-  # старт: текущие ключи (если есть)
   ( cat "$home_dir/.ssh/authorized_keys" 2>/dev/null || true ) >"$tmp"
 
-  # добавляем новые из $src
   local added=0 line
-  # нормализуем CRLF
   src="$(printf "%s" "$src" | tr -d '\r')"
   while IFS= read -r line; do
-    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"  # trim
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     if [[ "$line" =~ ^(ssh-|ecdsa-|sk-) ]]; then
       if ! grep -qxF "$line" "$tmp" 2>/dev/null; then
@@ -336,7 +272,6 @@ setup_ssh_keys() {
     fi
   done <<< "$src"
 
-  # атомарная замена
   chown "$user:$user" "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$home_dir/.ssh/authorized_keys"
@@ -348,38 +283,46 @@ setup_ssh_keys() {
   if [[ -f "$ROOT_AUTH" ]]; then
     local ts backup; ts="$(date +%Y%m%d-%H%M%S)"; backup="/root/authorized_keys.root.backup.$ts"
     cp -a "$ROOT_AUTH" "$backup" || true
-    : > "$ROOT_AUTH"
-    chmod 600 "$ROOT_AUTH"
-    chown root:root "$ROOT_AUTH"
+    : > "$ROOT_AUTH"; chmod 600 "$ROOT_AUTH"; chown root:root "$ROOT_AUTH"
     _ok "Ключи у root очищены. Бэкап: $backup"
   fi
 
+  # Вернём выбранное имя наверх
+  USERNAME="$user"
+  export USERNAME
   _ok "Готово. Пользователь: $user"
 }
 
-
+# если не --port-only: выполним настройку пользователя и ключей
 if ! $PORT_ONLY; then
-  setup_ssh_keys "$USERNAME"
+  setup_ssh_keys "${USERNAME:-}"
+else
+  # --port-only: нужен существующий пользователь для AllowUsers
+  if [[ -z "${USERNAME:-}" ]]; then
+    USERNAME="$(awk -F: '($3>=1000)&&($1!="nobody"){print $1":"$3}' /etc/passwd | sort -t: -k2,2n | tail -1 | cut -d: -f1)"
+  fi
+  if [[ -z "${USERNAME:-}" || -z "$(id -u "$USERNAME" 2>/dev/null)" ]]; then
+    print_err "Нужен существующий пользователь ( --user ). Запустите без --port-only для создания/настройки ключей."
+    exit 1
+  fi
 fi
 
 # ----------------------------
 # Выбор/проверка порта
 # ----------------------------
-if ! require_value "--port" "$NEW_PORT"; then
+if [[ -z "$NEW_PORT" ]]; then
+  if $NONINTERACTIVE; then
+    print_err "Требуется --port в неинтерактивном режиме"
+    exit 1
+  fi
   while true; do
     read -r -p "Введите новый порт SSH (1024-65535): " NEW_PORT
     if is_valid_port "$NEW_PORT" && port_is_free "$NEW_PORT"; then break; fi
-    print_err "Порт недопустим или занят"; [[ $NONINTERACTIVE == true ]] && exit 1
+    print_err "Порт недопустим или занят"
   done
 else
-  if ! is_valid_port "$NEW_PORT"; then
-    print_err "Недопустимый порт: $NEW_PORT"
-    exit 1
-  fi
-  if ! port_is_free "$NEW_PORT"; then
-    print_err "Порт уже занят: $NEW_PORT"
-    exit 1
-  fi
+  is_valid_port "$NEW_PORT" || { print_err "Недопустимый порт: $NEW_PORT"; exit 1; }
+  port_is_free "$NEW_PORT" || { print_err "Порт уже занят: $NEW_PORT"; exit 1; }
 fi
 
 # ----------------------------
@@ -388,17 +331,11 @@ fi
 print_info "Настройка UFW (брандмауэр)..."
 ufw default deny incoming
 ufw default allow outgoing
-
-# Разрешаем 80/443 (часто нужны на серверах)
 ufw allow 80/tcp
 ufw allow 443/tcp
-
-# Разрешим текущий 22/tcp (на случай активной сессии) и НОВЫЙ порт
 ufw allow 22/tcp || true
 ufw allow "${NEW_PORT}/tcp"
 ufw limit "${NEW_PORT}/tcp" || true
-
-# Включаем UFW только после всех правил
 ufw --force enable
 
 # ----------------------------
@@ -407,7 +344,7 @@ ufw --force enable
 print_info "Применение безопасных настроек SSH..."
 install -d -m 0755 /etc/ssh/sshd_config.d
 
-# На случай, если в основном файле явно задан Port — аккуратно закомментируем его (чтобы drop-in имел приоритет)
+# На случай, если в основном файле явно задан Port — закомментируем (чтобы drop-in имел приоритет)
 if grep -qE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config; then
   cp -a /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%Y%m%d-%H%M%S)"
   sed -i 's/^\([[:space:]]*Port[[:space:]]\+[0-9]\+\)/# \1  # disabled by ssh-setup.sh/g' /etc/ssh/sshd_config
@@ -450,14 +387,26 @@ backend  = systemd
 EOF
 
 systemctl enable fail2ban --now
-systemctl restart fail2ban
+systemctl restart fail2ban || true
 
 # ----------------------------
-# Удаляем старое правило 22/tcp (после успешного переключения)
+# Подтверждение перед закрытием 22/tcp
 # ----------------------------
-if ufw status | grep -qE '22/tcp'; then
-  print_info "Удаляю устаревшее правило UFW для 22/tcp..."
-  ufw delete allow 22/tcp >/dev/null 2>&1 || true
+SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+print_info "Проверьте вход с другой сессии (не разрывая текущую):"
+echo "  ssh -p ${NEW_PORT} ${USERNAME}@${SERVER_IP:-<IP-сервера>}"
+
+if $NONINTERACTIVE; then
+  print_warn "NONINTERACTIVE: порт 22/tcp оставлен открытым. Закройте вручную после проверки: ufw delete allow 22/tcp"
+else
+  while :; do
+    read -rp "[?] Удалось войти по ключу и новому порту? Напишите YES чтобы закрыть 22/tcp, NO — оставить: " ok
+    case "${ok^^}" in
+      YES) ufw delete allow 22/tcp >/dev/null 2>&1 || true; print_ok "Порт 22/tcp закрыт."; break;;
+      NO)  print_warn "Оставляю 22/tcp открытым. Закройте позже: ufw delete allow 22/tcp"; break;;
+      *)   echo "Введите YES или NO.";;
+    esac
+  done
 fi
 
 # ----------------------------
