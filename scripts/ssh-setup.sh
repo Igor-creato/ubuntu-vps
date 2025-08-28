@@ -472,33 +472,55 @@ setup_ufw() {
     # Сброс правил
     ufw --force reset >> "$LOG_FILE" 2>&1
     
-    # Разрешаем необходимые порты
+    # Разрешаем необходимые порты (включая старый порт 22 для безопасности)
+    ufw allow 22/tcp >> "$LOG_FILE" 2>&1
     ufw allow 80/tcp >> "$LOG_FILE" 2>&1
     ufw allow 443/tcp >> "$LOG_FILE" 2>&1
     ufw allow "$SSHD_PORT/tcp" >> "$LOG_FILE" 2>&1
     
     # Включаем UFW
     ufw --force enable >> "$LOG_FILE" 2>&1
-    log "UFW настроен с портами 80, 443 и $SSHD_PORT"
+    log "UFW настроен с портами 22, 80, 443 и $SSHD_PORT"
     
-    # Даем время для проверки
-    echo "Проверьте подключение по SSH к порту $SSHD_PORT"
-    echo "У вас есть 60 секунд для проверки перед закрытием порта 22..."
-    sleep 60
+    echo "=== ВАЖНОЕ ПРЕДУПРЕЖДЕНИЕ ==="
+    echo "Сейчас открыты оба порта: 22 и $SSHD_PORT"
+    echo "Проверьте подключение по SSH к НОВОМУ порту $SSHD_PORT"
+    echo "Убедитесь, что подключение работает корректно"
+    echo "============================="
     
-    # Закрываем порт 22
-    ufw delete allow 22/tcp >> "$LOG_FILE" 2>&1
-    
-    # Перезагружаем службы
-    systemctl restart ssh
-    systemctl restart fail2ban
-    
-    # Проверяем что SSH запустился
-    if ! systemctl is-active --quiet ssh; then
-        error_exit "Ошибка при перезагрузке SSH сервера после настройки UFW"
-    fi
-    
-    log "Порт 22 закрыт, службы перезагружены"
+    # Запрашиваем подтверждение перед закрытием порта 22
+    while true; do
+        read -rp "Подключение к порту $SSHD_PORT успешно? Готовы закрыть порт 22? (y/n): " confirm
+        confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
+        case $confirm in
+            y|yes|д|да)
+                # Закрываем порт 22 только после подтверждения
+                ufw delete allow 22/tcp >> "$LOG_FILE" 2>&1
+                
+                # Перезагружаем службы
+                systemctl restart ssh
+                systemctl restart fail2ban
+                
+                # Проверяем что SSH запустился
+                if ! systemctl is-active --quiet ssh; then
+                    error_exit "Ошибка при перезагрузке SSH сервера после настройки UFW"
+                fi
+                
+                log "Порт 22 закрыт, службы перезагружены"
+                echo "Порт 22 успешно закрыт. Подключение возможно только через порт $SSHD_PORT"
+                break
+                ;;
+            n|no|н|нет)
+                echo "Порт 22 остается открытым. Ручная проверка необходима."
+                echo "Вы можете закрыть порт 22 позже командой: ufw delete allow 22/tcp"
+                log "Порт 22 оставлен открытым по требованию пользователя"
+                break
+                ;;
+            *)
+                echo "Пожалуйста, ответьте yes/y или no/n"
+                ;;
+        esac
+    done
 }
 
 # Основная функция
