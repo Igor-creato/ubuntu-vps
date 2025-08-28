@@ -136,16 +136,12 @@ fi
 # Ключи SSH
 # ----------------------------
 # setup_ssh_keys <username?>
-# Если <username> не передан: предложит выбрать существующего sudo-пользователя или создать нового.
-# Использует глобалы (если есть): NONINTERACTIVE (true/false), KEY_FILE (/путь/к/.pub)
-# setup_ssh_keys <username?>
-# Если <username> не передан — предложит: выбрать существующего sudo-пользователя или создать нового.
-# Глобалы: NONINTERACTIVE=true/false, KEY_FILE=/path/to/key.pub
+# Если <username> не передан — предложит выбрать существующего пользователя (UID>=1000) или создать нового.
+# Глобалы, если есть: NONINTERACTIVE=true/false, KEY_FILE=/path/to/key.pub
 setup_ssh_keys() {
   set -euo pipefail
   umask 077
 
-  # локальные логгеры, чтобы не конфликтовать с твоими
   _info() { printf "\033[0;34m[INFO]\033[0m %s\n" "$*"; }
   _ok()   { printf "\033[0;32m[OK]\033[0m %s\n"   "$*"; }
   _warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
@@ -157,38 +153,62 @@ setup_ssh_keys() {
   local nonint="${NONINTERACTIVE:-false}"
   local key_file="${KEY_FILE:-}"
 
-  # --- 0) подобрать пользователя ---
+  # --- 0) выбрать / создать пользователя ---
   if [[ -z "$user" ]]; then
-    # Собираем всех "нормальных" пользователей и проверяем, кто в sudo
-    mapfile -t _candidates < <(awk -F: '($3>=1000)&&($1!="nobody")&&($7!~/nologin|false/){print $1}' /etc/passwd | sort -u)
-    declare -a _sudo_users=()
-    for u in "${_candidates[@]}"; do
-      if id -nG "$u" 2>/dev/null | grep -qw sudo; then _sudo_users+=("$u"); fi
+    # кандидаты: все нормальные (UID>=1000), исключая nobody; shell не /nologin
+    mapfile -t _cand < <(awk -F: '($3>=1000)&&($1!="nobody"){print $1}' /etc/passwd | sort -u)
+    declare -a _existing=()
+    for u in "${_cand[@]}"; do
+      # допускаем любые шеллы — админ мог поставить zsh/fish; лишь исключим системных
+      _existing+=("$u")
     done
 
-    if ((${#_sudo_users[@]} > 0)); then
+    if ((${#_existing[@]} > 0)); then
       if [[ "$nonint" == "true" ]]; then
-        _err "NONINTERACTIVE=true: укажите --user из: ${_sudo_users[*]}"
+        _err "NONINTERACTIVE=true: укажи --user (доступны: ${_existing[*]})"
         exit 1
       fi
-      _info "Найдены sudo-пользователи: ${_sudo_users[*]}"
+      _info "Обнаружены пользователи: ${#_existing[@]}"
       echo "  1) Использовать существующего"
       echo "  2) Создать нового"
       read -rp "[?] Выберите [1/2]: " _ch
       if [[ "$_ch" == "1" ]]; then
-        PS3="[?] Кого использовать: "
-        select sel in "${_sudo_users[@]}"; do [[ -n "$sel" ]] && user="$sel" && break; done
+        echo "[?] Выбери пользователя:"
+        local i=1
+        for u in "${_existing[@]}"; do
+          if id -nG "$u" 2>/dev/null | grep -qw sudo; then
+            printf "  %d) %s [sudo]\n" "$i" "$u"
+          else
+            printf "  %d) %s\n" "$i" "$u"
+          fi
+          ((i++))
+        done
+        while :; do
+          read -rp "[?] Номер: " n
+          [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#_existing[@]} )) && { user="${_existing[n-1]}"; break; }
+          _warn "Неверный номер."
+        done
+        # предложим добавить в sudo при необходимости
+        if ! id -nG "$user" | grep -qw sudo; then
+          if [[ "$nonint" == "true" ]]; then
+            _warn "Пользователь '$user' не в sudo (NONINTERACTIVE) — пропускаю добавление."
+          else
+            read -rp "[?] Добавить '$user' в sudo? [y/N]: " yn
+            [[ "${yn,,}" == "y" ]] && usermod -aG sudo "$user"
+          fi
+        fi
       else
+        # создать нового
         while :; do
           read -rp "[?] Имя нового пользователя: " user
           _is_valid_username "$user" || { _warn "Недопустимое имя"; continue; }
           if id "$user" &>/dev/null; then
-            _warn "Пользователь уже существует — будет использован как есть."
+            _warn "Такой пользователь уже есть — будет использован."
             # добавим в sudo при необходимости
             id -nG "$user" | grep -qw sudo || usermod -aG sudo "$user"
             break
           else
-            _info "Создаю пользователя $user и добавляю в sudo…"
+            _info "Создаю пользователя '$user' и добавляю в sudo…"
             adduser --disabled-password --gecos "" "$user"
             usermod -aG sudo "$user"
             break
@@ -196,16 +216,16 @@ setup_ssh_keys() {
         done
       fi
     else
-      # нет ни одного sudo — предлагаем создать нового (или в неинтерактиве требуем --user)
+      # нет ни одного нормального пользователя
       if [[ "$nonint" == "true" ]]; then
-        _err "Нет sudo-пользователей. Укажите --user для создания."
+        _err "Нет существующих пользователей (UID>=1000). Укажи --user для создания."
         exit 1
       fi
       while :; do
         read -rp "[?] Имя нового пользователя (будет добавлен в sudo): " user
         _is_valid_username "$user" || { _warn "Недопустимое имя"; continue; }
         if id "$user" &>/dev/null; then
-          _warn "Пользователь уже существует — добавляю в sudo (если ещё не там)."
+          _warn "Пользователь уже существует — добавляю в sudo (если нужно)."
           id -nG "$user" | grep -qw sudo || usermod -aG sudo "$user"
           break
         else
@@ -216,13 +236,13 @@ setup_ssh_keys() {
       done
     fi
   else
-    # имя передано: создать/добавить в sudo при необходимости
+    # user передан явно
     if ! id "$user" &>/dev/null; then
       if [[ "$nonint" == "true" ]]; then
         _err "Пользователь '$user' не найден (NONINTERACTIVE)."
         exit 1
       fi
-      _info "Создаю пользователя $user и добавляю в sudo…"
+      _info "Создаю пользователя '$user' и добавляю в sudo…"
       adduser --disabled-password --gecos "" "$user"
       usermod -aG sudo "$user"
     else
@@ -230,39 +250,29 @@ setup_ssh_keys() {
         if [[ "$nonint" == "true" ]]; then
           _warn "Пользователь '$user' не в sudo (NONINTERACTIVE) — пропускаю добавление."
         else
-          read -rp "[?] Пользователь '$user' не в sudo. Добавить? [y/N]: " yn
+          read -rp "[?] Добавить '$user' в sudo? [y/N]: " yn
           [[ "${yn,,}" == "y" ]] && usermod -aG sudo "$user"
         fi
       fi
     fi
   fi
 
-  # --- 1) подготовить ~/.ssh и authorized_keys ---
-  local home_dir
-  home_dir="$(getent passwd "$user" | cut -d: -f6)"
+  # --- 1) ~/.ssh и authorized_keys ---
+  local home_dir; home_dir="$(getent passwd "$user" | cut -d: -f6)"
   [[ -d "$home_dir" ]] || { _err "Домашний каталог не найден: $home_dir"; exit 1; }
-
   install -d -m 700 -o "$user" -g "$user" "$home_dir/.ssh"
   install -m 600 -o "$user" -g "$user" /dev/null "$home_dir/.ssh/authorized_keys"
 
-  # --- 2) собрать исходные ключи ---
+  # --- 2) источники ключей ---
   local ROOT_AUTH="/root/.ssh/authorized_keys"
   local root_has=false
   local src=""
-
   if [[ -s "$ROOT_AUTH" ]]; then
-    src="$(cat "$ROOT_AUTH")"
-    root_has=true
-    _info "Найдены ключи в $ROOT_AUTH"
+    src="$(cat "$ROOT_AUTH")"; root_has=true; _info "Найдены ключи в $ROOT_AUTH"
   fi
   if compgen -G "/root/.ssh/*.pub" >/dev/null 2>&1; then
-    local pubs
-    pubs="$(cat /root/.ssh/*.pub 2>/dev/null || true)"
-    if [[ -n "$pubs" ]]; then
-      src="${src:+$src"$'\n'"}$pubs"
-      root_has=true
-      _info "Найдены публичные ключи в /root/.ssh/*.pub"
-    fi
+    local pubs; pubs="$(cat /root/.ssh/*.pub 2>/dev/null || true)"
+    if [[ -n "$pubs" ]]; then src="${src:+$src$'\n'}$pubs"; root_has=true; _info "Найдены /root/.ssh/*.pub"; fi
   fi
 
   # --- 3) выбор сценария ---
@@ -283,7 +293,7 @@ setup_ssh_keys() {
     if [[ -n "$key_file" && -r "$key_file" ]]; then
       choice="2"
     elif [[ "$nonint" == "true" ]]; then
-      _err "У root ключей нет, а KEY_FILE не задан (NONINTERACTIVE)."
+      _err "У root ключей нет, KEY_FILE не задан (NONINTERACTIVE)."
       exit 1
     else
       echo "Ключей у root не найдено. Выберите:"
@@ -294,7 +304,7 @@ setup_ssh_keys() {
     fi
   fi
 
-  # --- 4) выполнить выбранный вариант ---
+  # --- 4) выполнить сценарий ---
   case "$choice" in
     1) [[ -n "$src" ]] || { _err "Нет ключей у root для переноса"; exit 1; } ;;
     2)
@@ -304,8 +314,7 @@ setup_ssh_keys() {
       else
         _info "Вставьте PUBLIC ключи (OpenSSH), по одному в строке. Завершите ввод Ctrl+D."
         echo "---"
-        local buf=""
-        while IFS= read -r line || [[ -n "$line" ]]; do buf+="${line}"$'\n'; done
+        local buf=""; while IFS= read -r line || [[ -n "$line" ]]; do buf+="${line}"$'\n'; done
         src="${buf%$'\n'}"
       fi
       ;;
@@ -322,7 +331,7 @@ setup_ssh_keys() {
 
   # --- 5) записать authorized_keys (валидируем, убираем дубли) ---
   local tmp; tmp="$(mktemp)"
-  cat "$home_dir/.ssh/authorized_keys" 2>/dev/null || true >"$tmp"
+  ( cat "$home_dir/.ssh/authorized_keys" 2>/dev/null || true ) >"$tmp"   # ВАЖНО: скобки!
 
   local added=0
   while IFS= read -r l; do
@@ -342,18 +351,15 @@ setup_ssh_keys() {
 
   # --- 6) очистить ключи у root (с бэкапом) ---
   if [[ -f "$ROOT_AUTH" ]]; then
-    local ts backup
-    ts="$(date +%Y%m%d-%H%M%S)"
-    backup="/root/authorized_keys.root.backup.$ts"
+    local ts backup; ts="$(date +%Y%m%d-%H%M%S)"; backup="/root/authorized_keys.root.backup.$ts"
     cp -a "$ROOT_AUTH" "$backup" || true
-    : > "$ROOT_AUTH"
-    chmod 600 "$ROOT_AUTH"
-    chown root:root "$ROOT_AUTH"
+    : > "$ROOT_AUTH"; chmod 600 "$ROOT_AUTH"; chown root:root "$ROOT_AUTH"
     _ok "Ключи у root очищены. Бэкап: $backup"
   fi
 
   _ok "Готово. Пользователь: $user"
 }
+
 
 
 
