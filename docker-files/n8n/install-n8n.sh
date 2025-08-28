@@ -14,6 +14,10 @@ cd "$N8N_DIR"
 echo "📂 Создаем директорию для секретов"
 mkdir -p secrets
 
+# Удаляем существующие volumes (если есть) чтобы избежать предупреждений
+echo "🧹 Очищаем старые volumes (если существуют)"
+docker volume rm n8n-postgres-data n8n-app-data n8n-shared-files 2>/dev/null || true
+
 # Создаем docker-compose.yml с актуальными стандартами
 echo "📝 Создаем docker-compose.yml с современным синтаксисом"
 cat > docker-compose.yml << 'EOF'
@@ -39,10 +43,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          memory: 512M
 
   n8n:
     image: docker.n8n.io/n8nio/n8n:latest
@@ -89,15 +89,12 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
       - "traefik.http.routers.n8n.entrypoints=websecure"
+      - "traefik.http.routers.n8n.tls.certresolver=le"
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
       - "traefik.docker.network=proxy"
     networks:
       - n8n_internal
       - proxy
-    deploy:
-      resources:
-        limits:
-          memory: 1024M
 
 networks:
   n8n_internal:
@@ -157,12 +154,6 @@ chmod 600 .env
 chmod 600 ./secrets/*
 chmod 700 secrets
 
-# Создаем Docker volumes
-echo "🐳 Создаем Docker volumes"
-docker volume create n8n-postgres-data
-docker volume create n8n-app-data
-docker volume create n8n-shared-files
-
 # Выводим одноразовую информацию
 echo ""
 echo "================================================"
@@ -188,31 +179,33 @@ docker compose up -d
 echo ""
 echo "✅ Развертывание завершено!"
 echo "🌐 n8n будет доступен по адресу: https://$N8N_HOST"
-echo "⏳ Подождите 1-2 минуты пока запустятся контейнеры"
+echo "⏳ Подождите 1-2 минуты пока запустятся контейнеры и Traefik получит SSL сертификаты"
+
+# Проверяем статус контейнеров
 echo ""
-echo "📋 Для проверки статуса: docker compose logs -f"
+echo "📊 Статус контейнеров:"
+docker compose ps
+
+# Проверяем логи Traefik для диагностики
+echo ""
+echo "🔍 Проверяем логи Traefik (первые 10 строк):"
+docker compose logs traefik 2>/dev/null | head -10 || echo "Traefik не найден в конфигурации"
+
+# Проверяем логи n8n
+echo ""
+echo "🔍 Проверяем логи n8n (первые 10 строк):"
+docker compose logs n8n | head -10
+
+echo ""
+echo "📋 Для полной проверки статуса: docker compose logs -f"
 echo "📊 Для просмотра volumes: docker volume ls | grep n8n"
 echo "🔧 Для остановки: docker compose down"
 echo "🔄 Для обновления: docker compose pull && docker compose up -d"
 
-# Выводим информацию о volumes
+# Дополнительные проверки для диагностики 404 ошибки
 echo ""
-echo "💾 СОЗДАННЫЕ DOCKER VOLUMES:"
-docker volume ls | grep n8n
-
-echo ""
-echo "🔒 ДАННЫЕ СОХРАНЯЮТСЯ В:"
-echo "   • PostgreSQL: volume n8n-postgres-data"
-echo "   • n8n приложение: volume n8n-app-data" 
-echo "   • Общие файлы: volume n8n-shared-files"
-echo "   • Секреты: $N8N_DIR/secrets/"
-
-# Проверяем наличие предупреждений
-echo ""
-echo "🔍 Проверяем конфигурацию..."
-if docker compose config >/dev/null 2>&1; then
-    echo "✅ Конфигурация Docker Compose валидна"
-else
-    echo "⚠️  Обнаружены проблемы в конфигурации:"
-    docker compose config
-fi
+echo "🔧 ДЛЯ ДИАГНОСТИКИ ОШИБКИ 404:"
+echo "1. Проверьте, что домен $N8N_HOST указывает на IP вашего сервера"
+echo "2. Убедитесь, что Traefik запущен и настроен правильно"
+echo "3. Проверьте настройки firewall: открыты порты 80 и 443"
+echo "4. Выполните: docker compose logs n8n - для детальной диагностики"
