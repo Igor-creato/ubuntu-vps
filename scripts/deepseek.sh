@@ -102,6 +102,50 @@ create_user() {
     done
 }
 
+# Функция проверки валидности SSH ключа
+validate_ssh_key() {
+    local key_data="$1"
+    
+    # Проверка на стандартный OpenSSH ключ (однострочный)
+    if echo "$key_data" | grep -q "ssh-"; then
+        return 0
+    fi
+    
+    # Проверка на многострочный ключ в формате SSH2
+    if echo "$key_data" | grep -q "BEGIN SSH2 PUBLIC KEY" && \
+       echo "$key_data" | grep -q "END SSH2 PUBLIC KEY"; then
+        return 0
+    fi
+    
+    # Проверка на многострочный ключ в формате OPENSSH
+    if echo "$key_data" | grep -q "BEGIN OPENSSH PRIVATE KEY" && \
+       echo "$key_data" | grep -q "END OPENSSH PRIVATE KEY"; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Функция нормализации SSH ключа (преобразование в однострочный формат)
+normalize_ssh_key() {
+    local key_data="$1"
+    
+    # Если это многострочный формат SSH2, извлекаем base64 данные
+    if echo "$key_data" | grep -q "BEGIN SSH2 PUBLIC KEY"; then
+        # Удаляем заголовки и футеры, оставляем только base64 данные
+        key_data=$(echo "$key_data" | sed -e '/BEGIN SSH2 PUBLIC KEY/d' \
+                                         -e '/END SSH2 PUBLIC KEY/d' \
+                                         -e '/Comment:/d' \
+                                         -e 's/^[[:space:]]*//' \
+                                         -e 's/[[:space:]]*$//' | tr -d '\n')
+        # Формируем стандартный OpenSSH ключ
+        echo "ssh-ed25519 $key_data"
+    else
+        # Для других форматов возвращаем как есть
+        echo "$key_data"
+    fi
+}
+
 # Работа с SSH ключами
 manage_ssh_keys() {
     local root_key="/root/.ssh/authorized_keys"
@@ -141,11 +185,26 @@ manage_ssh_keys() {
 add_ssh_key() {
     local ssh_dir="$1"
     local key_file="$2"
+    local key_data=""
+    
     mkdir -p "$ssh_dir"
     echo "Введите публичный ключ (Ctrl+D для завершения):"
-    key_data=$(cat)
-    if echo "$key_data" | grep -q "ssh-"; then
-        echo "$key_data" >> "$key_file"
+    
+    # Чтение многострочного ввода
+    while IFS= read -r line; do
+        key_data+="$line"$'\n'
+    done
+    
+    # Удаление последнего перевода строки
+    key_data="${key_data%$'\n'}"
+    
+    # Проверка валидности ключа
+    if validate_ssh_key "$key_data"; then
+        # Нормализация ключа (преобразование в однострочный формат если нужно)
+        local normalized_key=$(normalize_ssh_key "$key_data")
+        
+        # Добавление ключа в файл
+        echo "$normalized_key" >> "$key_file"
         chown -R "$USERNAME:$USERNAME" "$ssh_dir"
         chmod 700 "$ssh_dir"
         chmod 600 "$key_file"
@@ -160,13 +219,19 @@ change_ssh_port() {
     while true; do
         read -rp "Введите новый порт SSH: " port
         if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ]; then
+            # Создаем backup конфигурации
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
+            # Изменяем порт
             sed -i "s/^#Port.*/Port $port/" /etc/ssh/sshd_config
             sed -i "s/^Port.*/Port $port/" /etc/ssh/sshd_config
-            echo "Port $port" >> /etc/ssh/sshd_config
+            # Если порт не был задан, добавляем новую строку
+            if ! grep -q "^Port" /etc/ssh/sshd_config; then
+                echo "Port $port" >> /etc/ssh/sshd_config
+            fi
             SSHD_PORT="$port"
             break
         else
-            echo "Неверный порт"
+            echo "Неверный порт. Должен быть числом от 1024 до 65535"
         fi
     done
     log "SSH порт изменен на $SSHD_PORT"
@@ -174,7 +239,10 @@ change_ssh_port() {
 
 # Установка fail2ban
 install_fail2ban() {
+    log "Установка и настройка fail2ban..."
     apt-get install -y -q fail2ban >> "$LOG_FILE" 2>&1
+    
+    # Создаем конфигурацию для нового порта
     cat > /etc/fail2ban/jail.local << EOF
 [sshd]
 enabled = true
@@ -182,27 +250,43 @@ port = $SSHD_PORT
 logpath = %(sshd_log)s
 maxretry = 3
 EOF
+    
     systemctl restart fail2ban
     log "Fail2ban настроен для порта $SSHD_PORT"
 }
 
 # Настройка UFW
 setup_ufw() {
+    log "Настройка UFW..."
     apt-get install -y -q ufw >> "$LOG_FILE" 2>&1
-    ufw allow 80/tcp
-    ufw allow 443/tcp
-    ufw allow "$SSHD_PORT/tcp"
-    ufw --force enable
+    
+    # Сброс правил
+    ufw --force reset >> "$LOG_FILE" 2>&1
+    
+    # Разрешаем необходимые порты
+    ufw allow 80/tcp >> "$LOG_FILE" 2>&1
+    ufw allow 443/tcp >> "$LOG_FILE" 2>&1
+    ufw allow "$SSHD_PORT/tcp" >> "$LOG_FILE" 2>&1
+    
+    # Включаем UFW
+    ufw --force enable >> "$LOG_FILE" 2>&1
     log "UFW настроен с портами 80, 443 и $SSHD_PORT"
     
+    # Проверка подключения
     while true; do
         read -rp "Проверьте подключение по SSH к порту $SSHD_PORT. Успешно? (y/n): " confirm
         case $confirm in
             y|Y)
-                ufw delete allow 22/tcp
+                # Закрываем порт 22 и отключаем парольную аутентификацию
+                ufw delete allow 22/tcp >> "$LOG_FILE" 2>&1
+                
+                # Отключаем парольную аутентификацию
                 sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
                 sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+                
+                # Перезагружаем службы
                 systemctl restart ssh
+                systemctl restart fail2ban
                 break
                 ;;
             n|N)
