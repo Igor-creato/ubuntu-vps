@@ -23,6 +23,75 @@ trim() {
     printf '%s' "$var"
 }
 
+# Функция проверки прав доступа SSH
+verify_ssh_permissions() {
+    local user="$1"
+    local ssh_dir="/home/$user/.ssh"
+    local auth_keys="$ssh_dir/authorized_keys"
+    
+    log "Проверка прав доступа SSH для пользователя $user"
+    
+    # Проверка и создание директории
+    if [ ! -d "$ssh_dir" ]; then
+        mkdir -p "$ssh_dir"
+        chmod 700 "$ssh_dir"
+        chown "$user:$user" "$ssh_dir"
+        log "Создана директория $ssh_dir"
+    fi
+    
+    # Проверка и создание файла authorized_keys
+    if [ ! -f "$auth_keys" ]; then
+        touch "$auth_keys"
+        chmod 600 "$auth_keys"
+        chown "$user:$user" "$auth_keys"
+        log "Создан файл $auth_keys"
+    fi
+    
+    # Проверка прав доступа директории
+    if [ "$(stat -c %a "$ssh_dir")" != "700" ]; then
+        chmod 700 "$ssh_dir"
+        log "Исправлены права доступа для $ssh_dir"
+    fi
+    
+    # Проверка прав доступа файла
+    if [ "$(stat -c %a "$auth_keys")" != "600" ]; then
+        chmod 600 "$auth_keys"
+        log "Исправлены права доступа для $auth_keys"
+    fi
+    
+    # Проверка владельца
+    if [ "$(stat -c %U "$ssh_dir")" != "$user" ]; then
+        chown -R "$user:$user" "$ssh_dir"
+        log "Исправлен владелец для $ssh_dir"
+    fi
+}
+
+# Функция копирования ключей с проверкой
+copy_ssh_keys() {
+    local source_user="$1"
+    local target_user="$2"
+    local source_dir="/home/$source_user/.ssh"
+    local target_dir="/home/$target_user/.ssh"
+    
+    log "Копирование SSH ключей от $source_user к $target_user"
+    
+    # Проверка существования исходных ключей
+    if [ ! -f "$source_dir/authorized_keys" ]; then
+        log "Предупреждение: Нет ключей у пользователя $source_user для копирования"
+        return 1
+    fi
+    
+    # Создание целевой директории
+    verify_ssh_permissions "$target_user"
+    
+    # Копирование ключей
+    cp "$source_dir/authorized_keys" "$target_dir/"
+    chown "$target_user:$target_user" "$target_dir/authorized_keys"
+    chmod 600 "$target_dir/authorized_keys"
+    
+    log "Ключи успешно скопированы от $source_user к $target_user"
+}
+
 # Функция создания и настройки .ssh директории
 setup_ssh_directory() {
     local username=$(trim "$1")
@@ -30,24 +99,8 @@ setup_ssh_directory() {
     
     log "Настройка SSH директории для пользователя $username"
     
-    # Создаем директорию .ssh если ее нет
-    if [ ! -d "$ssh_dir" ]; then
-        mkdir -p "$ssh_dir"
-        log "Создана директория $ssh_dir"
-    fi
-    
-    # Устанавливаем правильные права
-    chmod 700 "$ssh_dir"
-    chown -R "$username:$username" "$ssh_dir"
-    
-    # Создаем файл authorized_keys если его нет
-    local auth_keys="$ssh_dir/authorized_keys"
-    if [ ! -f "$auth_keys" ]; then
-        touch "$auth_keys"
-        chmod 600 "$auth_keys"
-        chown "$username:$username" "$auth_keys"
-        log "Создан файл $auth_keys"
-    fi
+    # Используем функцию проверки прав доступа
+    verify_ssh_permissions "$username"
     
     echo "$ssh_dir"
 }
@@ -246,12 +299,14 @@ manage_ssh_keys() {
         
         case $choice in
             1)
-                # Копируем ключи от root и заменяем существующие
-                cp -f "$root_key" "$user_key"
-                chown "$USERNAME:$USERNAME" "$user_key"
-                chmod 600 "$user_key"
-                rm -f "$root_key"
-                log "Ключи перенесены от root к $USERNAME"
+                # Используем функцию копирования ключей
+                if copy_ssh_keys "root" "$USERNAME"; then
+                    rm -f "$root_key"
+                    log "Ключи перенесены от root к $USERNAME"
+                else
+                    echo "Не удалось скопировать ключи от root"
+                    add_ssh_key "$user_ssh" "$user_key"
+                fi
                 ;;
             2)
                 add_ssh_key "$user_ssh" "$user_key"
