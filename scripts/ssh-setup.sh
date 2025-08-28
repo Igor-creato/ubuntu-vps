@@ -3,7 +3,7 @@
 # Флаги:
 #   --user <name>            имя пользователя (если не задано — интерактивно)
 #   --port <num>             порт SSH (1024-65535)
-#   --key-file <path>        путь к публичному ключу (OpenSSH формат)
+#   --key-file <path>        путь к публичному ключу (OpenSSH или SSH2/RFC4716)
 #   --nopasswd-sudo          дать sudo без пароля (повышенный риск)
 #   --non-interactive        ошибаться вместо вопросов
 #   --port-only              пропустить создание/ключи; сменить только порт (USERNAME обязателен или берётся последний созданный)
@@ -13,9 +13,9 @@ shopt -s extglob
 
 # ---------- Цвета/логгеры ----------
 BLUE='\033[0;34m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
-print_info() { printf "${BLUE}[INFO]${NC} %s\n" "$*"; }
-print_ok()   { printf "${GREEN}[OK]${NC} %s\n"   "$*"; }
-print_warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$*"; }
+print_info() { printf "${BLUE}[INFO]${NC} %s\n" "$*" >&2; }
+print_ok()   { printf "${GREEN}[OK]${NC} %s\n"   "$*" >&2; }
+print_warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$*" >&2; }
 print_err()  { printf "${RED}[ERROR]${NC} %s\n" "$*" >&2; }
 
 trap 'print_err "Ошибка на строке $LINENO"; exit 1' ERR
@@ -89,6 +89,38 @@ current_ssh_port() {
 }
 
 ensure_dirs() { install -d -m 0755 /run/sshd; }
+
+num_or_zero() { [[ "$1" =~ ^[0-9]+$ ]] && echo "$1" || echo 0; }
+
+# Преобразовать возможный SSH2 (RFC4716) во входящий OpenSSH.
+normalize_to_openssh() {
+  # stdin -> stdout (OpenSSH keys only)
+  if grep -q '---- BEGIN SSH2 PUBLIC KEY ----' >/dev/null 2>&1; then
+    # конвертируем весь поток как RFC4716
+    if command -v ssh-keygen >/dev/null 2>&1; then
+      ssh-keygen -i -m RFC4716 -f /dev/stdin 2>/dev/null || true
+    else
+      # без ssh-keygen просто отбросим — лучше явное предупреждение
+      print_warn "Получен ключ в формате SSH2, но ssh-keygen недоступен для конвертации."
+    fi
+  else
+    cat
+  fi
+}
+
+# Фильтруем строки, оставляя только корректные OpenSSH ключи.
+filter_keys() {
+  awk '
+    {
+      gsub(/\r/,"");
+      sub(/^[[:space:]]+/,""); sub(/[[:space:]]+$/,"");
+      if ($0 ~ /^#/ || $0 == "") next;
+      if ($0 ~ /^(ssh-|ecdsa-|sk-)/) print $0;
+    }'
+}
+
+# Уникализация с сохранением порядка
+merge_unique() { awk '!seen[$0]++'; }
 
 # ---------- Пакеты/сервисы ----------
 export DEBIAN_FRONTEND=noninteractive
@@ -182,7 +214,7 @@ setup_ssh_keys() {
   # -- выбор источника ключей --
   local root_auth="/root/.ssh/authorized_keys"
   local have_root_keys="no"
-  if [[ -s "$root_auth" ]]; then have_root_keys="yes"; fi
+  [[ -s "$root_auth" ]] && have_root_keys="yes"
   if compgen -G "/root/.ssh/"'*.pub' >/dev/null 2>&1; then have_root_keys="yes"; fi
 
   local choice=""
@@ -212,32 +244,14 @@ setup_ssh_keys() {
     fi
   fi
 
-  # --- подготовим временные файлы ---
+  # --- временные файлы ---
   local tmp_existing tmp_candidates tmp_merged
   tmp_existing="$(mktemp)"; tmp_candidates="$(mktemp)"; tmp_merged="$(mktemp)"
-  # существующие ключи пользователя
   cat "$home_dir/.ssh/authorized_keys" > "$tmp_existing" || true
 
-  # — функции фильтрации и дедупа —
-  filter_keys() {
-    # stdin -> stdout: обрезать пробелы, убрать комментарии/пустые строки, оставить валидные префиксы
-    awk '
-      {
-        gsub(/\r/,"");
-        sub(/^[[:space:]]+/,""); sub(/[[:space:]]+$/,"");
-        if ($0 ~ /^#/ || $0 == "") next;
-        if ($0 ~ /^(ssh-|ecdsa-|sk-)/) print $0;
-      }'
-  }
-  merge_unique() {
-    # stdin (много файлов) -> stdout: сохранить первый порядок, убрать дубли
-    awk '!seen[$0]++'
-  }
-
-  # --- заполняем кандидаты согласно выбору ---
+  # --- заполняем кандидатов согласно выбору ---
   case "$choice" in
     1)
-      # перенос из root
       if [[ -r "$root_auth" ]]; then
         cat "$root_auth" >> "$tmp_candidates" || true
       fi
@@ -253,9 +267,8 @@ setup_ssh_keys() {
         [[ -r "$key_file" ]] || { print_err "Файл ключей недоступен: $key_file"; exit 1; }
         cat "$key_file" >> "$tmp_candidates"
       else
-        print_info "Вставьте PUBLIC ключи (OpenSSH), по одному в строке. Завершите ввод Ctrl+D."
+        print_info "Вставьте PUBLIC ключи (OpenSSH или SSH2/RFC4716), по одному в строке или блоком. Завершите ввод Ctrl+D."
         echo "---"
-        # читаем произвольное количество строк в файл-кандидат
         cat >> "$tmp_candidates"
       fi
       ;;
@@ -267,19 +280,16 @@ setup_ssh_keys() {
     *) print_err "Некорректный выбор."; exit 1;;
   esac
 
-  # — фильтруем кандидатов —
-  filter_keys < "$tmp_candidates" > "${tmp_candidates}.clean"
+  # — нормализация и фильтрация —
+  normalize_to_openssh < "$tmp_candidates" | filter_keys > "${tmp_candidates}.clean"
   mv -f "${tmp_candidates}.clean" "$tmp_candidates"
 
-  # — формируем объединённый список и считаем добавленные —
+  # — объединяем и считаем добавленные —
   local before after added_count
-  before="$(grep -Ec '^(ssh-|ecdsa-|sk-)' "$tmp_existing" || true)"
+  before="$(grep -Ec '^(ssh-|ecdsa-|sk-)' "$tmp_existing" 2>/dev/null || true)"; before="$(num_or_zero "$before")"
   cat "$tmp_existing" "$tmp_candidates" | filter_keys | merge_unique > "$tmp_merged"
-  after="$(grep -Ec '^(ssh-|ecdsa-|sk-)' "$tmp_merged" || true)"
-  if [[ -z "$before" ]]; then before=0; fi
-  if [[ -z "$after"  ]]; then after=0; fi
-  added_count=$(( after - before ))
-  (( added_count < 0 )) && added_count=0
+  after="$(grep -Ec '^(ssh-|ecdsa-|sk-)' "$tmp_merged" 2>/dev/null || true)";  after="$(num_or_zero "$after")"
+  added_count=$(( after - before )); (( added_count < 0 )) && added_count=0
 
   # — атомарно кладём authorized_keys —
   install -m 0600 -o "$user" -g "$user" "$tmp_merged" "$home_dir/.ssh/authorized_keys"
