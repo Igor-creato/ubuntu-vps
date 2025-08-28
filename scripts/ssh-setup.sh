@@ -346,6 +346,7 @@ install_ssh() {
 }
 
 # Создание пользователя
+# Создание пользователя
 create_user() {
     while true; do
         read -rp "Введите имя нового пользователя: " username
@@ -354,13 +355,22 @@ create_user() {
             if id -u "$username" >/dev/null 2>&1; then
                 echo "Пользователь уже существует"
             else
+                # Создаем пользователя без пароля
                 adduser --gecos "" --disabled-password "$username" >> "$LOG_FILE" 2>&1
+                
+                # Добавляем в группу sudo
                 usermod -aG sudo "$username"
+                
+                # Отключаем запрос пароля sudo для этого пользователя
+                echo "$username ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$username
+                chmod 440 /etc/sudoers.d/$username
+                
                 USERNAME="$username"
                 
                 # Создаем и настраиваем .ssh директорию
                 setup_ssh_directory "$USERNAME"
                 
+                log "Создан пользователь $USERNAME с правами sudo без пароля"
                 break
             fi
         else
@@ -391,6 +401,14 @@ select_user() {
             if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le $((${#sudo_users[@]} + 1)) ]; then
                 if [ "$choice" -le ${#sudo_users[@]} ]; then
                     USERNAME=$(trim "${sudo_users[$((choice-1))]}")
+                    
+                    # Проверяем и настраиваем sudo без пароля для существующего пользователя
+                    if [ ! -f "/etc/sudoers.d/$USERNAME" ]; then
+                        echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME
+                        chmod 440 /etc/sudoers.d/$USERNAME
+                        log "Настроен sudo без пароля для существующего пользователя $USERNAME"
+                    fi
+                    
                     break
                 else
                     create_user
