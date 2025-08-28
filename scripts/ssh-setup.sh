@@ -152,8 +152,8 @@ setup_ssh_keys() {
       exit 1
     fi
   else
-    # Пытаемся взять все ключи из root
-    for f in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub /root/.ssh/authorized_keys; do
+    # СНАЧАЛА authorized_keys root, потом .pub — берем весь файл
+    for f in /root/.ssh/authorized_keys /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub; do
       if [[ -f "$f" ]]; then
         pubkey="$(cat "$f")"
         break
@@ -163,7 +163,7 @@ setup_ssh_keys() {
 
   if [[ -z "${pubkey}" ]]; then
     if $NONINTERACTIVE; then
-      print_err "Публичный ключ не найден. Задайте --key-file или используйте режим без интерактива."
+      print_err "Публичный ключ не найден. Задайте --key-file."
       exit 1
     fi
     print_info "Публичный ключ не найден."
@@ -173,7 +173,7 @@ setup_ssh_keys() {
       read -r -p "Ваш выбор (1/2): " ch
       case "$ch" in
         1)
-          print_info "Вставьте PUBLIC key (OpenSSH, одна строка на ключ), затем Ctrl+D:"
+          print_info "Вставьте PUBLIC key (по одному в строке), затем Ctrl+D:"
           pubkey="$(cat)"
           [[ -n "$pubkey" ]] && break
           print_err "Ключ пустой или неверного формата";;
@@ -182,14 +182,14 @@ setup_ssh_keys() {
           local name="${user}_ed25519"
           ssh-keygen -t ed25519 -f "/root/.ssh/${name}" -N "" -C "${user}@$(hostname)"
           pubkey="$(cat "/root/.ssh/${name}.pub")"
-          print_ok "Сгенерирован ключ. Приватный ключ: /root/.ssh/${name}  (НЕ публикуйте его!)."
+          print_ok "Сгенерирован ключ. Приватный: /root/.ssh/${name}"
           break;;
         *) print_err "Выберите 1 или 2";;
       esac
     done
   fi
 
-  # Добавляем все ключи построчно, если их ещё нет
+  # Добавляем все строки-ключи без дублей
   local tmpfile
   tmpfile="$(mktemp)"
   cat "$home_dir/.ssh/authorized_keys" > "$tmpfile"
@@ -205,6 +205,7 @@ setup_ssh_keys() {
   rm -f "$tmpfile"
   print_ok "Публичный ключ(и) установлен(ы) пользователю $user."
 }
+
 
 
 
