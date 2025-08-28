@@ -347,6 +347,16 @@ add_ssh_key() {
         chown "$USERNAME:$USERNAME" "$key_file"
         chmod 600 "$key_file"
         log "Добавлен новый SSH ключ"
+        
+        # Проверяем что ключ действительно записался
+        if [ -s "$key_file" ]; then
+            log "Ключ успешно записан в $key_file"
+            echo "Содержимое файла:"
+            cat "$key_file"
+        else
+            log "ОШИБКА: Ключ не записался в файл $key_file"
+            error_exit "Не удалось записать SSH ключ"
+        fi
     else
         error_exit "Введен невалидный SSH ключ"
     fi
