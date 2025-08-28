@@ -89,19 +89,16 @@ current_ssh_port() {
 }
 
 ensure_dirs() { install -d -m 0755 /run/sshd; }
-
 num_or_zero() { [[ "$1" =~ ^[0-9]+$ ]] && echo "$1" || echo 0; }
 
 # Преобразовать возможный SSH2 (RFC4716) во входящий OpenSSH.
 normalize_to_openssh() {
   # stdin -> stdout (OpenSSH keys only)
   if grep -q '---- BEGIN SSH2 PUBLIC KEY ----' >/dev/null 2>&1; then
-    # конвертируем весь поток как RFC4716
     if command -v ssh-keygen >/dev/null 2>&1; then
       ssh-keygen -i -m RFC4716 -f /dev/stdin 2>/dev/null || true
     else
-      # без ssh-keygen просто отбросим — лучше явное предупреждение
-      print_warn "Получен ключ в формате SSH2, но ssh-keygen недоступен для конвертации."
+      print_warn "Получен ключ SSH2, но ssh-keygen недоступен — пропускаю."
     fi
   else
     cat
@@ -267,7 +264,7 @@ setup_ssh_keys() {
         [[ -r "$key_file" ]] || { print_err "Файл ключей недоступен: $key_file"; exit 1; }
         cat "$key_file" >> "$tmp_candidates"
       else
-        print_info "Вставьте PUBLIC ключи (OpenSSH или SSH2/RFC4716), по одному в строке или блоком. Завершите ввод Ctrl+D."
+        print_info "Вставьте PUBLIC ключи (OpenSSH или SSH2/RFC4716). Завершите ввод Ctrl+D."
         echo "---"
         cat >> "$tmp_candidates"
       fi
@@ -291,13 +288,22 @@ setup_ssh_keys() {
   after="$(grep -Ec '^(ssh-|ecdsa-|sk-)' "$tmp_merged" 2>/dev/null || true)";  after="$(num_or_zero "$after")"
   added_count=$(( after - before )); (( added_count < 0 )) && added_count=0
 
+  # === КРИТИЧЕСКИЙ СТОП ===
+  if (( after == 0 )); then
+    print_err "У пользователя '$user' нет ни одного валидного публичного ключа. Настройка SSH прервана, изменений в sshd/ufw/fail2ban не сделано.
+Совет: укажи --key-file /path/to/key.pub, вставь ключи вручную, либо выбери генерацию ключа (вариант 3)."
+    # Чистку ключей root НЕ делаем
+    rm -f "$tmp_existing" "$tmp_candidates" "$tmp_merged"
+    exit 1
+  fi
+
   # — атомарно кладём authorized_keys —
   install -m 0600 -o "$user" -g "$user" "$tmp_merged" "$home_dir/.ssh/authorized_keys"
 
   print_ok "Добавлено ключей: ${added_count}"
   print_info "Всего ключей у $user: ${after}"
 
-  # Очистка ключей у root (с бэкапом)
+  # Очистка ключей у root (с бэкапом) — ТОЛЬКО если у пользователя теперь есть ключи
   if [[ -f "$root_auth" ]]; then
     local ts backup; ts="$(date +%Y%m%d-%H%M%S)"; backup="/root/authorized_keys.root.backup.$ts"
     cp -a "$root_auth" "$backup" || true
