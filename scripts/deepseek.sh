@@ -162,7 +162,8 @@ manage_ssh_keys() {
             1)
                 mkdir -p "$user_ssh"
                 cp "$root_key" "$user_key"
-                chown -R "$USERNAME:$USERNAME" "$user_ssh"
+                # Исправлено: правильный формат для chown
+                chown -R "$USERNAME:$USERNAME" "$user_ssh" || error_exit "Ошибка изменения владельца для $user_ssh"
                 chmod 700 "$user_ssh"
                 chmod 600 "$user_key"
                 rm -f "$root_key"
@@ -205,7 +206,8 @@ add_ssh_key() {
         
         # Добавление ключа в файл
         echo "$normalized_key" >> "$key_file"
-        chown -R "$USERNAME:$USERNAME" "$ssh_dir"
+        # Исправлено: правильный формат для chown
+        chown -R "$USERNAME:$USERNAME" "$ssh_dir" || error_exit "Ошибка изменения владельца для $ssh_dir"
         chmod 700 "$ssh_dir"
         chmod 600 "$key_file"
         log "Добавлен новый SSH ключ"
@@ -283,6 +285,7 @@ setup_ufw() {
                 # Отключаем парольную аутентификацию
                 sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
                 sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+                echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
                 
                 # Перезагружаем службы
                 systemctl restart ssh
