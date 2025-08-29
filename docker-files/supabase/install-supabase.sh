@@ -99,7 +99,7 @@ set_env() {
     sed -i -E "s|^${var}=.*|${var}=${esc}|" .env
   else
     printf '%s=%s\n' "$var" "$val" >> .env
-  fi]
+  fi
 }
 
 echo "[INFO] Генерирую секреты и ключи..."
