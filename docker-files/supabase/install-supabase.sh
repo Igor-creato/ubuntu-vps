@@ -63,6 +63,39 @@ cp -R "$TMP_DIR/supabase/docker/." "$PROJECT_DIR/"
 
 cd "$PROJECT_DIR"
 
+# Определяем, как называется пулер в этом compose: supavisor / pooler / pgbouncer
+detect_pooler() {
+  local name=""
+  if grep -qE '^\s*supavisor:\s*$' docker-compose.yml; then
+    name="supavisor"
+  elif grep -qE '^\s*pooler:\s*$' docker-compose.yml; then
+    name="pooler"
+  elif grep -qE '^\s*pgbouncer:\s*$' docker-compose.yml; then
+    name="pgbouncer"
+  fi
+  printf '%s' "$name"
+}
+
+POOLER_SERVICE="$(detect_pooler)"
+[[ -n "$POOLER_SERVICE" ]] || fail "Не найден сервис пулера (supavisor/pooler/pgbouncer) в docker-compose.yml"
+
+# Порты и формат логина для разных пулеров
+case "$POOLER_SERVICE" in
+  supavisor|pooler)
+    POOLER_HOST="$POOLER_SERVICE"
+    POOLER_PORT_SESSION=5432
+    POOLER_PORT_TX=6543
+    POOLER_USER="postgres.${POOLER_TENANT_ID}"   # важно для Supavisor
+    ;;
+  pgbouncer)
+    POOLER_HOST="pgbouncer"
+    POOLER_PORT_SESSION=6432
+    POOLER_PORT_TX=""
+    POOLER_USER="postgres"
+    ;;
+esac
+
+
 ### ========= Работа с .env (на базе .env.example) =========
 [[ -f ".env.example" ]] || [[ -f ".env" ]] || fail ".env.example не найден в $PROJECT_DIR"
 if [[ -f ".env.example" ]]; then
@@ -142,7 +175,7 @@ set_env "KONG_HTTPS_PORT" "$KONG_HTTPS_PORT_DEFAULT"
 cat > docker-compose.traefik.yml <<YAML
 services:
   kong:
-    ports: []   # без публикации портов (Traefik терминирует снаружи)
+    ports: []
     networks:
       - default
       - ${TRAEFIK_NETWORK}
@@ -155,8 +188,7 @@ services:
       - "traefik.http.routers.${ROUTER_NAME}.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.services.${ROUTER_NAME}.loadbalancer.server.port=${KONG_HTTP_PORT_DEFAULT}"
 
-  pgbouncer:
-    # никаких портов и лейблов — только сетевое соседство с n8n в 'proxy'
+  ${POOLER_SERVICE}:          # <-- вместо "pgbouncer"
     networks:
       - default
       - ${TRAEFIK_NETWORK}
