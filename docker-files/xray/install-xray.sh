@@ -2,7 +2,9 @@
 # install-xray.sh — Разворачивает Xray (VLESS-клиент) в Docker Compose в ~/xray.
 # - Поднимает HTTP-прокси (3128) и SOCKS5 (1080) ДОСТУПНЫЕ ТОЛЬКО внутри docker-сети 'proxy'
 # - Ничего не публикует наружу (без ports:)
+# - Добавлен корректный healthcheck (проверка бинаря xray), включён access-лог
 # Документация: https://docs.docker.com/ , https://xtls.github.io/
+# Требования: docker, "docker compose" (plugin), существующая внешняя сеть Docker 'proxy'
 
 set -Eeuo pipefail
 
@@ -18,12 +20,12 @@ SOCKS_PORT=1080
 SERVER_ADDR=""
 SERVER_PORT="443"
 VLESS_UUID=""
-TRANSPORT="ws"
-TLS_ENABLE="true"
+TRANSPORT="ws"                   # ws | tcp
+TLS_ENABLE="true"                # true | false
 WS_PATH="/vless"
 
-log(){ echo -e "[\e[34mINFO\e[0m] $*"; }
-err(){ echo -e "[\e[31mERROR\e[0m] $*" >&2; }
+log() { echo -e "[\e[34mINFO\e[0m] $*"; }
+err() { echo -e "[\e[31mERROR\e[0m] $*" >&2; }
 
 # ===== Проверки окружения =====
 command -v docker >/dev/null 2>&1 || { err "Не найден docker. Установка: https://docs.docker.com/engine/install/"; exit 1; }
@@ -31,7 +33,7 @@ docker compose version >/dev/null 2>&1 || { err "'docker compose' недосту
 docker network inspect "$EXT_NET" >/dev/null 2>&1 || { err "Сеть '$EXT_NET' не найдена. Доступные: $(docker network ls --format '{{.Name}}' | tr '\n' ' ')"; exit 1; }
 
 # ===== Сбор параметров =====
-read -rp "Домен/IP VLESS-сервера (Нидерланды): " SERVER_ADDR
+read -rp "Домен/IP VLESS-сервера (например, NL): " SERVER_ADDR
 while [[ -z "$SERVER_ADDR" ]]; do read -rp "Пусто. Введи домен/IP: " SERVER_ADDR; done
 
 read -rp "Порт VLESS [${SERVER_PORT}]: " _p || true; SERVER_PORT="${_p:-$SERVER_PORT}"
@@ -58,8 +60,8 @@ if [[ "${TRANSPORT}" == "ws" ]]; then
 fi
 
 # ===== Подготовка каталогов =====
-log "Создаю каталог: ${XRAY_DIR}/xray"
-mkdir -p "${XRAY_DIR}/xray"
+log "Создаю каталоги: ${XRAY_DIR}/xray и ${XRAY_DIR}/logs"
+mkdir -p "${XRAY_DIR}/xray" "${XRAY_DIR}/logs"
 
 # ===== Формируем streamSettings =====
 if [[ "${TRANSPORT}" == "ws" ]]; then
@@ -109,7 +111,10 @@ fi
 # ===== Пишем config.json =====
 cat > "${XRAY_DIR}/xray/config.json" <<JSON
 {
-  "log": { "loglevel": "warning" },
+  "log": {
+    "access": "/var/log/xray/access.log",
+    "loglevel": "warning"
+  },
   "inbounds": [
     { "tag": "http-in",  "port": ${HTTP_PORT},  "listen": "0.0.0.0", "protocol": "http" },
     { "tag": "socks-in", "port": ${SOCKS_PORT}, "listen": "0.0.0.0", "protocol": "socks", "settings": { "udp": true } }
@@ -129,9 +134,7 @@ cat > "${XRAY_DIR}/xray/config.json" <<JSON
           }
         ]
       },
-      "streamSettings": {
-        ${STREAM_SETTINGS}
-      }
+      "streamSettings": { ${STREAM_SETTINGS} }
     },
     { "protocol": "freedom",  "tag": "direct" },
     { "protocol": "blackhole","tag": "block" }
@@ -154,13 +157,14 @@ services:
     restart: unless-stopped
     volumes:
       - ./xray/config.json:/etc/xray/config.json:ro
+      - ./logs:/var/log/xray
     networks:
       - ${EXT_NET}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${HTTP_PORT} >/dev/null 2>&1 || exit 1"]
-      interval: 15s
+      test: ["CMD", "/usr/bin/xray", "-version"]
+      interval: 30s
       timeout: 5s
-      retries: 5
+      retries: 3
 
 networks:
   ${EXT_NET}:
@@ -182,15 +186,24 @@ cat <<'NEXT'
 
 Готово ✅
 
-Подключение ТОЛЬКО для n8n (в его docker-compose):
-  environment:
-    HTTP_PROXY:  "http://xray-client:3128"
-    HTTPS_PROXY: "http://xray-client:3128"
-    NO_PROXY:    "localhost,127.0.0.1,::1,n8n,postgres,traefik,wp-app,wp-db,wp-pma,supabase-db,supabase-pooler,supabase-auth,supabase-rest,supabase-realtime,supabase-storage,supabase-studio,supabase-meta,supabase-edge-functions,supabase-analytics,supabase-imgproxy,supabase-vector,supabase-kong,realtime-dev.supabase-realtime"
+Дальше:
+1) Убедись, что n8n подключён к сети 'proxy' и использует прокси в переменных окружения:
+   - верхний регистр:  HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
+   - нижний регистр:   http_proxy / https_proxy / all_proxy / no_proxy
+   Значение прокси:    http://xray-client:3128
 
-Проверка из n8n (в контейнере):
-  docker compose exec n8n sh -lc 'wget -qO- https://ifconfig.io || curl -s https://ifconfig.io'
+2) Диагностика трафика через прокси:
+   # окно 1 — следим за логом Xray
+   docker compose -f ~/xray/docker-compose.yml exec xray-client sh -lc 'tail -f /var/log/xray/access.log'
 
-Принудительно через прокси:
-  docker compose exec n8n sh -lc 'wget -qO- --proxy=http://xray-client:3128 https://ifconfig.io || curl -x http://xray-client:3128 -s https://ifconfig.io'
+   # окно 2 — из контейнера n8n отправляем запрос строго через прокси
+   docker compose -f ~/n8n/docker-compose.yml exec n8n sh -lc \
+     'apk add --no-cache curl 2>/dev/null || true; curl -s -x http://xray-client:3128 https://api.ipify.org && echo'
+
+   В access.log должны появиться записи от inbound http-in → outbound vless-out.
+   Вернувшийся IP должен быть IP со стороны VLESS-провайдера, а не IP хоста.
+
+3) Если некоторая нода в n8n всё равно обходит прокси — укажи
+   прокси явно в параметрах узла (HTTP Request → Proxy = http://xray-client:3128).
+
 NEXT
