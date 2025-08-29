@@ -23,3 +23,6 @@ install supabase
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/supabase/install-supabase.sh)
 ```
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/wordpress/install-wp.sh)
+```
