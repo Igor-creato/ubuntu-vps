@@ -1,31 +1,32 @@
 #!/usr/bin/env bash
 # install-xray.sh — Разворачивает Xray (VLESS-клиент) в Docker Compose в ~/xray.
 # - Поднимает HTTP-прокси (3128) и SOCKS5 (1080) ДОСТУПНЫЕ ТОЛЬКО внутри docker-сети 'proxy'
-# - Ничего не публикует на хост (без ports:)
+# - Ничего не публикует наружу (без ports:)
 # Документация: https://docs.docker.com/ , https://xtls.github.io/
+
 set -Eeuo pipefail
 
-# ===== Настройки по умолчанию =====
+# ===== Настройки =====
 XRAY_DIR="${HOME}/xray"
-EXT_NET="proxy"                 # внешняя сеть Docker (у тебя уже есть)
+EXT_NET="proxy"                  # внешняя сеть Docker
 SERVICE_NAME="xray-client"
 XRAY_IMAGE="teddysun/xray:latest"
-HTTP_PORT=3128                  # ВНУТРИ сети docker (без публикации)
+HTTP_PORT=3128
 SOCKS_PORT=1080
 
-# Будут ЗАПРОШЕНЫ интерактивно:
-SERVER_ADDR=""                  # домен/IP VLESS-сервера (NL)
-SERVER_PORT="443"               # порт VLESS
-VLESS_UUID=""                   # UUID (обязательно вручную)
-TRANSPORT="ws"                  # ws | tcp
-TLS_ENABLE="true"               # true | false
-WS_PATH="/vless"                # только для ws
+# Будут запрошены интерактивно:
+SERVER_ADDR=""
+SERVER_PORT="443"
+VLESS_UUID=""
+TRANSPORT="ws"
+TLS_ENABLE="true"
+WS_PATH="/vless"
 
 log(){ echo -e "[\e[34mINFO\e[0m] $*"; }
 err(){ echo -e "[\e[31mERROR\e[0m] $*" >&2; }
 
 # ===== Проверки окружения =====
-command -v docker >/dev/null 2>&1 || { err "Не найден docker. См. установку: https://docs.docker.com/engine/install/"; exit 1; }
+command -v docker >/dev/null 2>&1 || { err "Не найден docker. Установка: https://docs.docker.com/engine/install/"; exit 1; }
 docker compose version >/dev/null 2>&1 || { err "'docker compose' недоступен. См.: https://docs.docker.com/compose/install/linux/"; exit 1; }
 docker network inspect "$EXT_NET" >/dev/null 2>&1 || { err "Сеть '$EXT_NET' не найдена. Доступные: $(docker network ls --format '{{.Name}}' | tr '\n' ' ')"; exit 1; }
 
@@ -35,7 +36,6 @@ while [[ -z "$SERVER_ADDR" ]]; do read -rp "Пусто. Введи домен/IP
 
 read -rp "Порт VLESS [${SERVER_PORT}]: " _p || true; SERVER_PORT="${_p:-$SERVER_PORT}"
 
-# UUID запрашиваем и валидируем (формат 8-4-4-4-12 hex)
 uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 read -rp "UUID пользователя VLESS (формат xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): " VLESS_UUID
 while [[ ! "$VLESS_UUID" =~ $uuid_re ]]; do
@@ -58,7 +58,7 @@ if [[ "${TRANSPORT}" == "ws" ]]; then
 fi
 
 # ===== Подготовка каталогов =====
-log "Готовлю каталог: ${XRAY_DIR}/xray"
+log "Создаю каталог: ${XRAY_DIR}/xray"
 mkdir -p "${XRAY_DIR}/xray"
 
 # ===== Формируем streamSettings =====
@@ -147,24 +147,23 @@ JSON
 
 # ===== Пишем docker-compose.yml =====
 cat > "${XRAY_DIR}/docker-compose.yml" <<YAML
-version: "3.9"
-
 services:
   ${SERVICE_NAME}:
     image: ${XRAY_IMAGE}
     container_name: ${SERVICE_NAME}
     restart: unless-stopped
-    command: ["-config", "/etc/xray/config.json"]
     volumes:
       - ./xray/config.json:/etc/xray/config.json:ro
-    # Порты наружу НЕ публикуем. Прокси доступны контейнерам в сети '${EXT_NET}' по имени '${SERVICE_NAME}'.
-    # ports:
-    #   - "${HTTP_PORT}:${HTTP_PORT}"
-    #   - "${SOCKS_PORT}:${SOCKS_PORT}"
+    networks:
+      - ${EXT_NET}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${HTTP_PORT} >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
 networks:
-  default:
-    name: ${EXT_NET}
+  ${EXT_NET}:
     external: true
 YAML
 
@@ -176,7 +175,7 @@ docker compose up -d
 docker compose ps
 popd >/dev/null
 
-log "Проверка: контейнер должен быть в сети '${EXT_NET}'"
+log "Проверка: контейнер '${SERVICE_NAME}' должен быть в сети '${EXT_NET}'"
 docker inspect "${SERVICE_NAME}" --format '{{json .NetworkSettings.Networks}}' || true
 
 cat <<'NEXT'
@@ -189,14 +188,9 @@ cat <<'NEXT'
     HTTPS_PROXY: "http://xray-client:3128"
     NO_PROXY:    "localhost,127.0.0.1,::1,n8n,postgres,traefik,wp-app,wp-db,wp-pma,supabase-db,supabase-pooler,supabase-auth,supabase-rest,supabase-realtime,supabase-storage,supabase-studio,supabase-meta,supabase-edge-functions,supabase-analytics,supabase-imgproxy,supabase-vector,supabase-kong,realtime-dev.supabase-realtime"
 
-Проверка из n8n (в контейнере, у n8n обычно /bin/sh, а не bash):
-  cd ~/n8n
-  docker compose exec n8n sh -lc 'env | grep -E "HTTP_PROXY|HTTPS_PROXY|NO_PROXY"'
+Проверка из n8n (в контейнере):
   docker compose exec n8n sh -lc 'wget -qO- https://ifconfig.io || curl -s https://ifconfig.io'
-  # принудительно через прокси:
-  docker compose exec n8n sh -lc 'wget -qO- --proxy=http://xray-client:3128 https://ifconfig.io || curl -x http://xray-client:3128 -s https://ifconfig.io'
 
-Если имя xray-client не резолвится внутри n8n — проверь, что ОБА контейнера в сети 'proxy':
-  docker inspect xray-client --format '{{json .NetworkSettings.Networks}}'
-  docker inspect <имя-контейнера-n8n> --format '{{json .NetworkSettings.Networks}}'
+Принудительно через прокси:
+  docker compose exec n8n sh -lc 'wget -qO- --proxy=http://xray-client:3128 https://ifconfig.io || curl -x http://xray-client:3128 -s https://ifconfig.io'
 NEXT
