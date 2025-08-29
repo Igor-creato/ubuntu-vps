@@ -249,20 +249,21 @@ EOF
     # Создание docker-compose.override.yml для Traefik
     print_info "Создание конфигурации для Traefik..."
     
-cat > docker-compose.override.yml << 'EOF'
+    cat > docker-compose.override.yml << EOF
+version: "3.8"
 
 services:
+  # Отключаем vector так как аналитика отключена
   vector:
-    image: alpine:latest
-    command: "echo 'Vector disabled'"
-    restart: "no"
     profiles:
-      - disabled
+      - analytics
+    deploy:
+      replicas: 0
 
   studio:
     labels:
       - traefik.enable=true
-      - traefik.http.routers.supabase-studio.rule=Host(`${SUPABASE_DOMAIN}`)
+      - traefik.http.routers.supabase-studio.rule=Host(\`${SUPABASE_DOMAIN}\`)
       - traefik.http.routers.supabase-studio.entrypoints=websecure
       - traefik.http.routers.supabase-studio.tls.certresolver=letsencrypt
       - traefik.http.services.supabase-studio.loadbalancer.server.port=3000
@@ -273,7 +274,7 @@ services:
   kong:
     labels:
       - traefik.enable=true
-      - traefik.http.routers.supabase-api.rule=Host(`${SUPABASE_DOMAIN}`) && PathPrefix(`/auth`, `/rest`, `/storage`, `/realtime`)
+      - traefik.http.routers.supabase-api.rule=Host(\`${SUPABASE_DOMAIN}\`) && PathPrefix(\`/auth\`, \`/rest\`, \`/storage\`, \`/realtime\`)
       - traefik.http.routers.supabase-api.entrypoints=websecure
       - traefik.http.routers.supabase-api.tls.certresolver=letsencrypt
       - traefik.http.services.supabase-api.loadbalancer.server.port=8000
