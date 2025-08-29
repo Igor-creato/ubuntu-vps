@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Supabase Traefik Deployment Script
+# Supabase Traefik Deployment Script - ИСПРАВЛЕННАЯ ВЕРСИЯ
 # Автоматическое развертывание Supabase с Traefik reverse proxy
 # Использует современные best practices и актуальные версии
 
@@ -67,29 +67,17 @@ generate_jwt_secret() {
     openssl rand -base64 32 | tr -d "=+/" | cut -c1-40
 }
 
-# Генерация API ключей
-generate_api_keys() {
+generate_api_key() {
     local jwt_secret=$1
-    
-    # Генерация ANON_KEY
-    local anon_payload='{"role":"anon","iss":"supabase","iat":'$(date +%s)',"exp":'$(date -d "+10 years" +%s)'}'
-    local anon_key=$(echo -n "$anon_payload" | \
+    local payload='{"role":"'$2'","iss":"supabase","iat":'$(date +%s)',"exp":'$(date -d "+10 years" +%s)'}'
+    echo -n "$payload" | \
         openssl dgst -sha256 -hmac "$jwt_secret" -binary | \
-        base64 -w 0 | tr '+/' '-_' | tr -d '=')
-    
-    # Генерация SERVICE_ROLE_KEY
-    local service_payload='{"role":"service_role","iss":"supabase","iat":'$(date +%s)',"exp":'$(date -d "+10 years" +%s)'}'
-    local service_key=$(echo -n "$service_payload" | \
-        openssl dgst -sha256 -hmac "$jwt_secret" -binary | \
-        base64 -w 0 | tr '+/' '-_' | tr -d '=')
-    
-    echo "$anon_key:$service_key"
+        base64 -w 0 | tr '+/' '-_' | tr -d '='
 }
 
 # Основная функция
 main() {
-    print_info "🚀 Supabase Traefik Deployment Script"
-    print_info "Автоматическое развертывание Supabase с Traefik reverse proxy"
+    print_info "🚀 Supabase Traefik Deployment Script (Исправленная версия)"
     
     check_dependencies
     
@@ -110,7 +98,7 @@ main() {
     cd supabase
     
     # Клонирование репозитория
-    if [[ ! -d "docker" ]]; then
+    if [[ ! -f "docker-compose.yml" ]]; then
         print_info "Клонирование официального репозитория Supabase..."
         git clone --depth 1 https://github.com/supabase/supabase.git temp
         mv temp/docker/* .
@@ -123,52 +111,73 @@ main() {
     local POSTGRES_PASSWORD=$(generate_password)
     local JWT_SECRET=$(generate_jwt_secret)
     local DASHBOARD_PASSWORD=$(generate_password)
-    local POOLER_TENANT_ID=$(openssl rand -hex 8)
+    local ANON_KEY=$(generate_api_key "$JWT_SECRET" "anon")
+    local SERVICE_ROLE_KEY=$(generate_api_key "$JWT_SECRET" "service_role")
     
-    # Генерация API ключей
-    local api_keys=$(generate_api_keys "$JWT_SECRET")
-    local ANON_KEY=$(echo "$api_keys" | cut -d':' -f1)
-    local SERVICE_ROLE_KEY=$(echo "$api_keys" | cut -d':' -f2)
-    
-    # Создание .env файла
+    # Создание полного .env файла со всеми необходимыми переменными
     print_info "Создание файла окружения..."
     
+    # Генерация порта для Postgres (найдем свободный)
+    local POSTGRES_PORT=$(python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+port = 5433
+while port < 6000:
+    try:
+        s.bind(('localhost', port))
+        s.close()
+        print(port)
+        break
+    except OSError:
+        port += 1
+" 2>/dev/null || echo "5433")
+    
     cat > .env << EOF
-# Supabase Configuration
+############
+# Database #
+############
+POSTGRES_HOST=db
+POSTGRES_DB=postgres
+POSTGRES_PORT=$POSTGRES_PORT  # Измененный порт для избежания конфликта с n8n
+POSTGRES_USER=postgres
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+
+############
+# Supabase #
+############
 JWT_SECRET=$JWT_SECRET
 ANON_KEY=$ANON_KEY
 SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY
 
-# Database Configuration
-POSTGRES_HOST=db
-POSTGRES_DB=postgres
-POSTGRES_PORT=5432
-POSTGRES_USER=postgres
+# API
+KONG_HTTP_PORT=8000
+KONG_HTTPS_PORT=8443
+API_EXTERNAL_URL=https://$SUPABASE_DOMAIN
 
-# Pooler Configuration
-POOLER_TENANT_ID=$POOLER_TENANT_ID
-POOLER_PROXY_PORT_TRANSACTION=6543
-
-# Studio Configuration
+# Studio
 STUDIO_DEFAULT_ORGANIZATION=Supabase
 STUDIO_DEFAULT_PROJECT=Default Project
 STUDIO_PORT=3000
-
-# Kong Configuration
-KONG_HTTP_PORT=8000
-KONG_HTTPS_PORT=8443
-
-# Dashboard Authentication
-DASHBOARD_USERNAME=admin
-DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD
-
-# URLs
 SUPABASE_PUBLIC_URL=https://$SUPABASE_DOMAIN
 SITE_URL=https://$SUPABASE_DOMAIN
 ADDITIONAL_REDIRECT_URLS=
 
-# SMTP Configuration (измените при необходимости)
+# Auth
+JWT_EXPIRY=3600
+DISABLE_SIGNUP=false
+ENABLE_EMAIL_SIGNUP=true
+ENABLE_EMAIL_AUTOCONFIRM=true
+ENABLE_ANONYMOUS_USERS=false
+ENABLE_PHONE_SIGNUP=true
+ENABLE_PHONE_AUTOCONFIRM=true
+
+# Mailer
+MAILER_URLPATHS_INVITE=/auth/v1/verify
+MAILER_URLPATHS_CONFIRMATION=/auth/v1/verify
+MAILER_URLPATHS_RECOVERY=/auth/v1/verify
+MAILER_URLPATHS_EMAIL_CHANGE=/auth/v1/verify
+
+# SMTP
 SMTP_ADMIN_EMAIL=admin@$DOMAIN
 SMTP_HOST=supabase-mail
 SMTP_PORT=2500
@@ -176,33 +185,81 @@ SMTP_USER=fake_mail_user
 SMTP_PASS=fake_mail_password
 SMTP_SENDER_NAME=fake_sender
 
-# Storage Configuration
+# Storage
 STORAGE_BACKEND=file
 FILE_STORAGE_BACKEND_PATH=/var/lib/storage
+GLOBAL_S3_BUCKET=stub
+AWS_ACCESS_KEY_ID=stub
+AWS_SECRET_ACCESS_KEY=stub
+AWS_DEFAULT_REGION=stub
 
-# Analytics (отключено для минимального развертывания)
+# Analytics disabled
 ANALYTICS_ENABLED=false
+LOGFLARE_API_KEY=stub
+LOGFLARE_PUBLIC_ACCESS_TOKEN=stub
+LOGFLARE_PRIVATE_ACCESS_TOKEN=stub
 
 # Edge Functions
 FUNCTIONS_HTTP_PORT=9002
+FUNCTIONS_VERIFY_JWT=false
+DOCKER_SOCKET_LOCATION=/var/run/docker.sock
 
-# Realtime Configuration
+# Realtime
 REALTIME_IP_VERSION=IPv4
 
-# Other services
-ENABLE_IMAGE_PROXIMATION=true
+# Pooler - используем другой порт для избежания конфликта
+POOLER_TENANT_ID=your-tenant-id
+POOLER_PROXY_PORT_TRANSACTION=6543
+POOLER_DEFAULT_POOL_SIZE=20
+POOLER_MAX_CLIENT_CONN=100
+POOLER_DB_POOL_SIZE=15
+
+# Vault
+VAULT_ENC_KEY=$(generate_password)
+
+# Storage secrets
+POSTGREST_JWT_SECRET=$JWT_SECRET
+PGRST_DB_SCHEMAS=public,storage,graphql_public
+PGRST_DB_ANON_ROLE=anon
+
+# Dashboard
+DASHBOARD_USERNAME=admin
+DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD
+
+# Secrets for other services
+SECRET_KEY_BASE=$(generate_password)
+
+# Default values for services
 IMGPROXY_ENABLE_WEBP_DETECTION=true
+ENABLE_IMAGE_PROXIMATION=true
 EOF
     
     print_success "Файл окружения создан: .env"
     
+    # Исправление docker-compose.yml - убираем проблемный volume
+    print_info "Исправление docker-compose.yml..."
+    
+    # Создаем исправленный docker-compose.yml
+    cp docker-compose.yml docker-compose.yml.backup
+    
+    # Убираем проблемный volume для docker socket
+    sed -i '/DOCKER_SOCKET_LOCATION/d' docker-compose.yml
+    sed -i 's|${DOCKER_SOCKET_LOCATION}:/var/run/docker.sock:ro,z|/var/run/docker.sock:/var/run/docker.sock:ro|g' docker-compose.yml
+    
     # Создание docker-compose.override.yml для Traefik
     print_info "Создание конфигурации для Traefik..."
     
-    cat > docker-compose.override.yml << EOF
+       cat > docker-compose.override.yml << EOF
 version: "3.8"
 
 services:
+  db:
+    ports:
+      - "${POSTGRES_PORT}:5432"  # Проброс измененного порта
+    networks:
+      - default
+      - proxy
+
   studio:
     labels:
       - traefik.enable=true
@@ -235,7 +292,6 @@ EOF
     # Создание вспомогательных скриптов
     print_info "Создание вспомогательных скриптов..."
     
-    # Скрипт для управления сервисом
     cat > manage.sh << 'EOF'
 #!/bin/bash
 
@@ -273,26 +329,6 @@ esac
 EOF
     
     chmod +x manage.sh
-    
-    # Скрипт для резервного копирования
-    cat > backup.sh << 'EOF'
-#!/bin/bash
-
-BACKUP_DIR="./backups/$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$BACKUP_DIR"
-
-echo "Создание резервной копии базы данных..."
-docker compose exec db pg_dump -U postgres postgres > "$BACKUP_DIR/database.sql"
-
-echo "Создание резервной копии конфигурации..."
-cp .env "$BACKUP_DIR/"
-cp docker-compose.yml "$BACKUP_DIR/"
-cp docker-compose.override.yml "$BACKUP_DIR/"
-
-echo "Резервная копия создана: $BACKUP_DIR"
-EOF
-    
-    chmod +x backup.sh
     
     # Запуск сервисов
     print_info "Запуск Supabase..."
@@ -332,7 +368,6 @@ EOF
     echo "   Остановка: ./manage.sh stop"
     echo "   Рестарт: ./manage.sh restart"
     echo "   Логи: ./manage.sh logs"
-    echo "   Резервное копирование: ./backup.sh"
 }
 
 # Обработка ошибок
