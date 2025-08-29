@@ -136,7 +136,8 @@ if [[ -f docker-compose.yml ]]; then
 fi
 
 if [[ "${compose_needs_write}" == "true" ]]; then
-  cat > docker-compose.yml <<YAML
+cat > docker-compose.yml <<YAML
+version: "3.9"
 
 name: wp-stack
 
@@ -146,14 +147,14 @@ services:
     container_name: wp-db
     restart: unless-stopped
     environment:
-      - MARIADB_DATABASE=${DB_NAME}
-      - MARIADB_USER=${DB_USER}
-      - MARIADB_PASSWORD=${DB_PASSWORD}
-      - MARIADB_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
+      - MARIADB_DATABASE=\${DB_NAME}
+      - MARIADB_USER=\${DB_USER}
+      - MARIADB_PASSWORD=\${DB_PASSWORD}
+      - MARIADB_ROOT_PASSWORD=\${DB_ROOT_PASSWORD}
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p\"${DB_ROOT_PASSWORD}\" || exit 1"]
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p\"\${DB_ROOT_PASSWORD}\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -169,18 +170,18 @@ services:
         condition: service_healthy
     environment:
       - WORDPRESS_DB_HOST=db:3306
-      - WORDPRESS_DB_NAME=${DB_NAME}
-      - WORDPRESS_DB_USER=${DB_USER}
-      - WORDPRESS_DB_PASSWORD=${DB_PASSWORD}
+      - WORDPRESS_DB_NAME=\${DB_NAME}
+      - WORDPRESS_DB_USER=\${DB_USER}
+      - WORDPRESS_DB_PASSWORD=\${DB_PASSWORD}
       - WORDPRESS_CONFIG_EXTRA=define('FS_METHOD','direct');
-      - AUTH_KEY=${WP_AUTH_KEY}
-      - SECURE_AUTH_KEY=${WP_SECURE_AUTH_KEY}
-      - LOGGED_IN_KEY=${WP_LOGGED_IN_KEY}
-      - NONCE_KEY=${WP_NONCE_KEY}
-      - AUTH_SALT=${WP_AUTH_SALT}
-      - SECURE_AUTH_SALT=${WP_SECURE_AUTH_SALT}
-      - LOGGED_IN_SALT=${WP_LOGGED_IN_SALT}
-      - NONCE_SALT=${WP_NONCE_SALT}
+      - AUTH_KEY=\${WP_AUTH_KEY}
+      - SECURE_AUTH_KEY=\${WP_SECURE_AUTH_KEY}
+      - LOGGED_IN_KEY=\${WP_LOGGED_IN_KEY}
+      - NONCE_KEY=\${WP_NONCE_KEY}
+      - AUTH_SALT=\${WP_AUTH_SALT}
+      - SECURE_AUTH_SALT=\${WP_SECURE_AUTH_SALT}
+      - LOGGED_IN_SALT=\${WP_LOGGED_IN_SALT}
+      - NONCE_SALT=\${WP_NONCE_SALT}
     volumes:
       - wp_data:/var/www/html
     labels:
@@ -188,29 +189,29 @@ services:
       - "traefik.docker.network=proxy"
 
       # ===== HTTPS (основной сайт) =====
-      - "traefik.http.routers.wp.rule=Host(`${WP_DOMAIN}`)"
+      - "traefik.http.routers.wp.rule=Host(\\`\${WP_DOMAIN}\\`)"
       - "traefik.http.routers.wp.entrypoints=websecure"
       - "traefik.http.routers.wp.tls=true"
-      - "traefik.http.routers.wp.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.routers.wp.tls.certresolver=\${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.routers.wp.service=wp"
       - "traefik.http.services.wp.loadbalancer.server.port=80"
 
-      # ===== HTTP → HTTPS редирект (убирает 404 на http://) =====
-      - "traefik.http.routers.wp-http.rule=Host(`${WP_DOMAIN}`)"
+      # ===== HTTP → HTTPS редирект =====
+      - "traefik.http.routers.wp-http.rule=Host(\\`\${WP_DOMAIN}\\`)"
       - "traefik.http.routers.wp-http.entrypoints=web"
       - "traefik.http.routers.wp-http.middlewares=https-redirect@docker"
       - "traefik.http.routers.wp-http.service=wp"
 
-      # ===== www → apex редирект (для HTTPS) =====
-      - "traefik.http.routers.wp-www.rule=Host(`www.${WP_DOMAIN}`)"
+      # ===== www → apex редирект (HTTPS) =====
+      - "traefik.http.routers.wp-www.rule=Host(\\`www.\${WP_DOMAIN}\\`)"
       - "traefik.http.routers.wp-www.entrypoints=websecure"
       - "traefik.http.routers.wp-www.tls=true"
-      - "traefik.http.routers.wp-www.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.routers.wp-www.tls.certresolver=\${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.routers.wp-www.middlewares=wp-www-redirect@docker"
       - "traefik.http.routers.wp-www.service=wp"
 
-      # ===== www → apex редирект (для HTTP) =====
-      - "traefik.http.routers.wp-www-http.rule=Host(`www.${WP_DOMAIN}`)"
+      # ===== www → apex редирект (HTTP) =====
+      - "traefik.http.routers.wp-www-http.rule=Host(\\`www.\${WP_DOMAIN}\\`)"
       - "traefik.http.routers.wp-www-http.entrypoints=web"
       - "traefik.http.routers.wp-www-http.middlewares=wp-www-redirect@docker"
 
@@ -218,7 +219,7 @@ services:
       - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
       - "traefik.http.middlewares.https-redirect.redirectscheme.permanent=true"
       - "traefik.http.middlewares.wp-www-redirect.redirectregex.regex=^https?://www\\.(.*)"
-      - "traefik.http.middlewares.wp-www-redirect.redirectregex.replacement=https://$1"
+      - "traefik.http.middlewares.wp-www-redirect.redirectregex.replacement=https://\\$1"
       - "traefik.http.middlewares.wp-www-redirect.redirectregex.permanent=true"
 
     networks:
@@ -236,31 +237,28 @@ services:
       - PMA_HOST=db
       - PMA_ARBITRARY=0
       - UPLOAD_LIMIT=64M
-      - PMA_ABSOLUTE_URI=https://pma.${WP_DOMAIN}/
+      - PMA_ABSOLUTE_URI=https://pma.\${WP_DOMAIN}/
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
 
       # ===== HTTPS =====
-      - "traefik.http.routers.pma.rule=Host(`pma.${WP_DOMAIN}`)"
+      - "traefik.http.routers.pma.rule=Host(\\`pma.\${WP_DOMAIN}\\`)"
       - "traefik.http.routers.pma.entrypoints=websecure"
       - "traefik.http.routers.pma.tls=true"
-      - "traefik.http.routers.pma.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.routers.pma.tls.certresolver=\${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.routers.pma.service=pma"
       - "traefik.http.services.pma.loadbalancer.server.port=80"
 
       # ===== HTTP → HTTPS редирект =====
-      - "traefik.http.routers.pma-http.rule=Host(`pma.${WP_DOMAIN}`)"
+      - "traefik.http.routers.pma-http.rule=Host(\\`pma.\${WP_DOMAIN}\\`)"
       - "traefik.http.routers.pma-http.entrypoints=web"
       - "traefik.http.routers.pma-http.middlewares=https-redirect@docker"
       - "traefik.http.routers.pma-http.service=pma"
 
-      # ===== Basic Auth через файл =====
-      # Basic Auth через встроенный хеш (устойчиво к '$')
-      - "traefik.http.middlewares.pma-auth.basicauth.users=${HASH}"
+      # ===== Basic Auth через встроенный хеш =====
+      - "traefik.http.middlewares.pma-auth.basicauth.users=\${HASH}"
       - "traefik.http.routers.pma.middlewares=pma-auth@docker"
-
-
 
     volumes:
       - wp_data:/var/www/html
@@ -280,6 +278,7 @@ networks:
   proxy:
     external: true
 YAML
+
   log "Создан свежий docker-compose.yml."
 fi
 
