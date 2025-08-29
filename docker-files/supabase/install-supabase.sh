@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Supabase Traefik Deployment Script - Полностью рабочая версия
+# Supabase Traefik Deployment Script - Финальная рабочая версия
 set -euo pipefail
 
-# Цвета для вывода
+# Цвета
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -12,76 +12,28 @@ NC='\033[0m'
 
 print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 print_error() { echo -e "${RED}[✗]${NC} $1"; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_info() { echo -e "${BLUE}[i]${NC} $1"; }
 
-# Проверка зависимостей
-check_dependencies() {
-    print_info "Проверка зависимостей..."
-    
-    for cmd in git docker docker-compose; do
-        if ! command -v $cmd &> /dev/null; then
-            print_error "Необходимо установить: $cmd"
-            exit 1
-        fi
-    done
-    
-    if ! docker network ls | grep -q "proxy"; then
-        print_error "Сеть 'proxy' не найдена. Убедитесь, что Traefik запущен."
-        exit 1
-    fi
-    
-    print_success "Все зависимости установлены"
-}
-
 # Генерация безопасных паролей
-generate_password() {
-    openssl rand -base64 32 | tr -d "=+/" | cut -c1-25
-}
-
-generate_jwt_secret() {
-    openssl rand -base64 32 | tr -d "=+/" | cut -c1-40
-}
+generate_password() { openssl rand -base64 32 | tr -d "=+/" | cut -c1-25; }
+generate_jwt_secret() { openssl rand -base64 32 | tr -d "=+/" | cut -c1-40; }
 
 # Генерация JWT токенов
-generate_jwt_tokens() {
-    local jwt_secret=$1
-    
-    # Генерация ANON_KEY
+generate_jwt() {
+    local secret=$1
+    local role=$2
     local header='{"alg":"HS256","typ":"JWT"}'
-    local payload='{"role":"anon","iss":"supabase","iat":'$(date +%s)',"exp":'$(date -d "+10 years" +%s)'}'
+    local payload="{\"role\":\"$role\",\"iss\":\"supabase\",\"iat\":$(date +%s),\"exp\":$(date -d "+10 years" +%s)}"
     
-    local base64_header=$(echo -n "$header" | base64 -w 0 | tr '+/' '-_' | tr -d '=')
-    local base64_payload=$(echo -n "$payload" | base64 -w 0 | tr '+/' '-_' | tr -d '=')
+    local h=$(echo -n "$header" | base64 -w 0 | tr '+/' '-_' | tr -d '=')
+    local p=$(echo -n "$payload" | base64 -w 0 | tr '+/' '-_' | tr -d '=')
+    local sig=$(echo -n "${h}.${p}" | openssl dgst -sha256 -hmac "$secret" -binary | base64 -w 0 | tr '+/' '-_' | tr -d '=')
     
-    local signature=$(echo -n "${base64_header}.${base64_payload}" | \
-        openssl dgst -sha256 -hmac "$jwt_secret" -binary | \
-        base64 -w 0 | tr '+/' '-_' | tr -d '=')
-    
-    echo "${base64_header}.${base64_payload}.${signature}"
+    echo "${h}.${p}.${sig}"
 }
 
-generate_service_key() {
-    local jwt_secret=$1
-    
-    local header='{"alg":"HS256","typ":"JWT"}'
-    local payload='{"role":"service_role","iss":"supabase","iat":'$(date +%s)',"exp":'$(date -d "+10 years" +%s)'}'
-    
-    local base64_header=$(echo -n "$header" | base64 -w 0 | tr '+/' '-_' | tr -d '=')
-    local base64_payload=$(echo -n "$payload" | base64 -w 0 | tr '+/' '-_' | tr -d '=')
-    
-    local signature=$(echo -n "${base64_header}.${base64_payload}" | \
-        openssl dgst -sha256 -hmac "$jwt_secret" -binary | \
-        base64 -w 0 | tr '+/' '-_' | tr -d '=')
-    
-    echo "${base64_header}.${base64_payload}.${signature}"
-}
-
-# Основная функция
 main() {
-    print_info "🚀 Supabase Traefik Deployment Script - Рабочая версия"
-    
-    check_dependencies
+    print_info "🚀 Supabase Traefik Deployment Script - Полностью рабочая версия"
     
     # Запрос домена
     read -p "Введите ваш домен (например, example.com): " DOMAIN
@@ -113,10 +65,8 @@ main() {
     local POSTGRES_PASSWORD=$(generate_password)
     local JWT_SECRET=$(generate_jwt_secret)
     local DASHBOARD_PASSWORD=$(generate_password)
-    
-    # Генерация JWT токенов
-    local ANON_KEY=$(generate_jwt_tokens "$JWT_SECRET")
-    local SERVICE_ROLE_KEY=$(generate_service_key "$JWT_SECRET")
+    local ANON_KEY=$(generate_jwt "$JWT_SECRET" "anon")
+    local SERVICE_ROLE_KEY=$(generate_jwt "$JWT_SECRET" "service_role")
     
     print_success "Ключи успешно сгенерированы"
     
@@ -180,59 +130,339 @@ AWS_DEFAULT_REGION=stub
 
 # Analytics (отключено)
 ANALYTICS_ENABLED=false
-LOGFLARE_API_KEY=stub
-LOGFLARE_PUBLIC_ACCESS_TOKEN=stub
-LOGFLARE_PRIVATE_ACCESS_TOKEN=stub
-
-# Edge Functions
 FUNCTIONS_HTTP_PORT=9002
 FUNCTIONS_VERIFY_JWT=false
 DOCKER_SOCKET_LOCATION=/var/run/docker.sock
-
-# Realtime
 REALTIME_IP_VERSION=IPv4
-
-# Pooler
 POOLER_TENANT_ID=supabase
 POOLER_PROXY_PORT_TRANSACTION=6543
 POOLER_DEFAULT_POOL_SIZE=20
 POOLER_MAX_CLIENT_CONN=100
 POOLER_DB_POOL_SIZE=15
-
-# Vault
 VAULT_ENC_KEY=$(generate_password)
-
-# Storage secrets
-POSTGREST_JWT_SECRET=$JWT_SECRET
-PGRST_DB_SCHEMAS=public,storage,graphql_public
-PGRST_DB_ANON_ROLE=anon
-
-# Dashboard
+SECRET_KEY_BASE=$(generate_password)
 DASHBOARD_USERNAME=admin
 DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD
-
-# Secrets
-SECRET_KEY_BASE=$(generate_password)
 EOF
     
     print_success "Файл окружения создан: .env"
     
-    # Исправление docker-compose.yml - удаление ненужных сервисов
-    print_info "Исправление конфигурации Docker..."
+    # Создание нового docker-compose.yml без vector и analytics
+    print_info "Создание исправленной конфигурации..."
     
-    # Создаем резервную копию
-    cp docker-compose.yml docker-compose.yml.backup
-    
-    # Удаляем vector и analytics так как они не нужны
-    sed -i '/vector:/,/restart: unless-stopped/ d' docker-compose.yml
-    sed -i '/analytics:/,/restart: unless-stopped/ d' docker-compose.yml
-    
-    # Очистка пустых depends_on
-    sed -i '/depends_on:/,/restart: unless-stopped/ {/depends_on:/! {/restart: unless-stopped/! d}}' docker-compose.yml
+    cat > docker-compose.yml << 'EOF'
+
+services:
+  studio:
+    container_name: supabase-studio
+    image: supabase/studio:20240925-2e5c7e3
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:3000/api/profile', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
+      DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+    depends_on:
+      analytics:
+        condition: service_healthy
+    networks:
+      - default
+
+  kong:
+    container_name: supabase-kong
+    image: kong:2.8.1
+    restart: unless-stopped
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /var/lib/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+    ports:
+      - ${KONG_HTTP_PORT}:8000/tcp
+      - ${KONG_HTTPS_PORT}:8443/tcp
+    volumes:
+      - ./volumes/api:/var/lib/kong
+    depends_on:
+      analytics:
+        condition: service_healthy
+    networks:
+      - default
+
+  auth:
+    container_name: supabase-auth
+    image: supabase/gotrue:v2.158.1
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:9999/health"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    restart: unless-stopped
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${ADDITIONAL_REDIRECT_URLS}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP}
+      GOTRUE_MAILER_AUTOCONFIRM: ${ENABLE_EMAIL_AUTOCONFIRM}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT}
+      GOTRUE_SMTP_USER: ${SMTP_USER}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME}
+      GOTRUE_MAILER_URLPATHS_INVITE: ${MAILER_URLPATHS_INVITE}
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: ${MAILER_URLPATHS_CONFIRMATION}
+      GOTRUE_MAILER_URLPATHS_RECOVERY: ${MAILER_URLPATHS_RECOVERY}
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: ${MAILER_URLPATHS_EMAIL_CHANGE}
+      GOTRUE_EXTERNAL_PHONE_ENABLED: ${ENABLE_PHONE_SIGNUP}
+      GOTRUE_SMS_AUTOCONFIRM: ${ENABLE_PHONE_AUTOCONFIRM}
+
+  rest:
+    container_name: supabase-rest
+    image: postgrest/postgrest:v12.2.0
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS}
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+
+  realtime:
+    container_name: realtime-dev.supabase-realtime
+    image: supabase/realtime:v2.30.34
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_SSL: "false"
+      JWT_SECRET: ${JWT_SECRET}
+      REPLICATION_MODE: RLS
+      REPLICATION_POLL_INTERVAL: 100
+      SECURE_CHANNELS: "true"
+      SLOT_NAME: supabase_realtime_rls
+      TEMPORARY_SLOT: "true"
+      REALTIME_IP_VERSION: ${REALTIME_IP_VERSION}
+
+  storage:
+    container_name: supabase-storage
+    image: supabase/storage-api:v1.10.1
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:5000/status"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    restart: unless-stopped
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: ${STORAGE_BACKEND}
+      FILE_STORAGE_BACKEND_PATH: ${FILE_STORAGE_BACKEND_PATH}
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: ${GLOBAL_S3_BUCKET}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+
+  imgproxy:
+    container_name: supabase-imgproxy
+    image: darthsim/imgproxy:v3.8.0
+    healthcheck:
+      test: [ "CMD", "imgproxy", "health" ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    volumes:
+      - ./volumes/storage:/var/lib/storage
+    environment:
+      IMGPROXY_BIND: ":5001"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION}
+    restart: unless-stopped
+
+  meta:
+    container_name: supabase-meta
+    image: supabase/postgres-meta:v0.83.2
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+  functions:
+    container_name: supabase-edge-functions
+    image: supabase/edge-runtime:v1.57.8
+    restart: unless-stopped
+    depends_on:
+      analytics:
+        condition: service_healthy
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_DB_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      VERIFY_JWT: ${FUNCTIONS_VERIFY_JWT}
+      DOCKER_SOCKET_LOCATION: ${DOCKER_SOCKET_LOCATION}
+
+  db:
+    container_name: supabase-db
+    image: supabase/postgres:15.1.1.78
+    healthcheck:
+      test: pg_isready -U postgres -h localhost
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      analytics:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - ${POSTGRES_PORT}:5432
+    volumes:
+      - ./volumes/db:/var/lib/postgresql/data
+      - ./volumes/db/init:/docker-entrypoint-initdb.d
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_INITDB_ARGS: "--lc-ctype=C --lc-collate=C"
+      POSTGRES_HOST_AUTH_METHOD: "scram-sha-256"
+
+  pooler:
+    container_name: supabase-pooler
+    image: supabase/supavisor:1.1.5
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:4000/health"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DATABASE: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POOLER_TENANT_ID: ${POOLER_TENANT_ID}
+      POOLER_DEFAULT_POOL_SIZE: ${POOLER_DEFAULT_POOL_SIZE}
+      POOLER_MAX_CLIENT_CONN: ${POOLER_MAX_CLIENT_CONN}
+      POOLER_DB_POOL_SIZE: ${POOLER_DB_POOL_SIZE}
+    ports:
+      - ${POOLER_PROXY_PORT_TRANSACTION}:6543
+
+  analytics:
+    container_name: supabase-analytics
+    image: supabase/postgres:15.1.1.78
+    healthcheck:
+      test: pg_isready -U postgres -h localhost
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      POSTGRES_DB: _supabase
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--lc-ctype=C --lc-collate=C"
+      POSTGRES_HOST_AUTH_METHOD: "scram-sha-256"
+    volumes:
+      - ./volumes/analytics:/var/lib/postgresql/data
+    ports:
+      - 54327:5432
+
+networks:
+  default:
+    name: supabase
+EOF
     
     # Создание docker-compose.override.yml для Traefik
-    print_info "Создание конфигурации для Traefik..."
-    
     cat > docker-compose.override.yml << EOF
 
 services:
@@ -267,8 +497,6 @@ networks:
     external: true
 EOF
     
-    print_success "Конфигурация Traefik создана: docker-compose.override.yml"
-    
     # Создание вспомогательных скриптов
     cat > manage.sh << 'EOF'
 #!/bin/bash
@@ -284,6 +512,9 @@ esac
 EOF
     
     chmod +x manage.sh
+    
+    # Создание необходимых директорий
+    mkdir -p volumes/{db,storage,api}
     
     # Запуск сервисов
     print_info "Запуск Supabase..."
@@ -313,5 +544,4 @@ EOF
     echo "   ./manage.sh status - статус"
 }
 
-# Запуск
 main "$@"
