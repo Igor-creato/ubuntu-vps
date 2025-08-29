@@ -185,13 +185,10 @@ services:
       - "traefik.http.routers.${ROUTER_NAME}.rule=Host(\`${DASHBOARD_FQDN}\`)"
       - "traefik.http.routers.${ROUTER_NAME}.entrypoints=websecure"
       - "traefik.http.routers.${ROUTER_NAME}.tls=true"
+      - "traefik.http.routers.${ROUTER_NAME}.tls.certresolver=letsencrypt"
       - "traefik.http.services.${ROUTER_NAME}.loadbalancer.server.port=${KONG_HTTP_PORT_DEFAULT}"
 YAML
 
-# Добавим certresolver, если указан
-if [[ -n "${TRAEFIK_CERT_RESOLVER// }" ]]; then
-  sed -i "/tls=true/a \ \ \ \ \ \ - \"traefik.http.routers.${ROUTER_NAME}.tls.certresolver=${TRAEFIK_CERT_RESOLVER}\"" docker-compose.traefik.yml
-fi
 
 # Подключим внешнюю сеть
 cat >> docker-compose.traefik.yml <<YAML
