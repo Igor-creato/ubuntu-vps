@@ -73,7 +73,7 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
       - "traefik.http.routers.n8n.entrypoints=websecure"
-      - "traefik.http.routers.n8n.tls.certresolver=le"
+      - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
       - "traefik.docker.network=proxy"
     networks:
