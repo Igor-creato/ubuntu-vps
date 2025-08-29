@@ -120,9 +120,10 @@ docker run --rm -v "$PWD/auth:/work" \
 chmod 600 auth/.htpasswd || warn "Не удалось изменить права auth/.htpasswd — продолжаю."
 log "Файл auth/.htpasswd создан. Данные BasicAuth (логин/пароль) сохранены в .env."
 
-# Считаем хеш из auth/.htpasswd и экранируем $ для docker-compose
-HASH="$(sed 's/\$/$$/g' auth/.htpasswd)"
+# Считаем строку "user:hash" из файла и экранируем $ для docker-compose/labels
+HASH="$(tr -d '\r\n' < auth/.htpasswd | sed 's/\$/$$/g')"
 export HASH
+
 
 # ------------------------ docker-compose.yml ------------------------
 compose_needs_write=true
@@ -135,7 +136,7 @@ if [[ -f docker-compose.yml ]]; then
 fi
 
 if [[ "${compose_needs_write}" == "true" ]]; then
-  cat > docker-compose.yml <<'YAML'
+  cat > docker-compose.yml <<YAML
 
 name: wp-stack
 
@@ -258,6 +259,7 @@ services:
       # Basic Auth через встроенный хеш (устойчиво к '$')
       - "traefik.http.middlewares.pma-auth.basicauth.users=${HASH}"
       - "traefik.http.routers.pma.middlewares=pma-auth@docker"
+
 
 
     volumes:
