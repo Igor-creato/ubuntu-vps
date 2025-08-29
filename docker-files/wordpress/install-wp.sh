@@ -1,112 +1,126 @@
 #!/usr/bin/env bash
-# install-wp.sh — установка WordPress-стэка за Traefik в сети proxy
-# Требования: Docker Engine + docker compose plugin, запущенный Traefik с внешней сетью "proxy".
-# ОС: Ubuntu 22.04+ (подойдёт и любая Linux с Docker)
+# install-wp.sh — Установка WordPress + MariaDB + phpMyAdmin за Traefik (external network: proxy)
+# ОС: Ubuntu 22.04+ / Linux. Требуется Docker Engine и плагин docker compose v2.
+# Автор: devops-setup
 
 set -Eeuo pipefail
+IFS=$'\n\t'
 
-# ---------- функции утилиты ----------
-log()   { printf "[%s] %s\n" "$(date +'%F %T')" "$*"; }
-fail()  { printf "[%s] [ERROR] %s\n" "$(date +'%F %T')" "$*" >&2; exit 1; }
+# ------------------------ Утилиты вывода/ошибок ------------------------
+log()  { printf "[%s] %s\n" "$(date +'%F %T')" "$*"; }
+warn() { printf "[%s] [WARN] %s\n" "$(date +'%F %T')" "$*" >&2; }
+fail() { printf "[%s] [ERROR] %s\n" "$(date +'%F %T')" "$*" >&2; exit 1; }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || fail "Команда '$1' не найдена. Установите её и повторите."
+on_err() {
+  local ec=$?
+  fail "Скрипт завершился с ошибкой (код: ${ec}). Проверьте вывод выше."
 }
+trap on_err ERR
 
-gen_secret() { # base64 без спецсимволов проблемных для env
-  openssl rand -base64 48 | tr -d '\n'
-}
+# ------------------------ Проверки окружения ------------------------
+need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Не найдена команда '$1'. Установите и повторите."; }
 
-ensure_proxy_network() {
-  if ! docker network inspect proxy >/dev/null 2>&1; then
-    read -r -p "Внешняя сеть 'proxy' не найдена. Создать? [y/N]: " ans
-    if [[ "${ans:-N}" =~ ^[Yy]$ ]]; then
-      docker network create proxy || fail "Не удалось создать сеть 'proxy'"
-      log "Создана сеть 'proxy'."
-    else
-      fail "Нужна внешняя сеть 'proxy'. Создайте её вручную: docker network create proxy"
-    fi
-  fi
-}
-
-# ---------- проверки окружения ----------
 need_cmd docker
 need_cmd openssl
 if ! docker compose version >/dev/null 2>&1; then
   fail "Плагин 'docker compose' не найден. Установите Docker Compose v2."
 fi
 
+# ------------------------ Сеть proxy (Traefik) ------------------------
+ensure_proxy_network() {
+  if ! docker network inspect proxy >/dev/null 2>&1; then
+    read -r -p "Внешняя сеть 'proxy' не найдена. Создать её? [y/N]: " ans
+    if [[ "${ans:-N}" =~ ^[Yy]$ ]]; then
+      docker network create proxy >/dev/null || fail "Не удалось создать сеть 'proxy'."
+      log "Создана внешняя сеть 'proxy'."
+    else
+      fail "Нужна внешняя сеть 'proxy'. Создайте её: docker network create proxy"
+    fi
+  fi
+}
 ensure_proxy_network
 
-# ---------- ввод домена ----------
+# ------------------------ Ввод домена ------------------------
 read -r -p "Введите домен для WordPress (например, example.com): " WP_DOMAIN
 [[ -n "${WP_DOMAIN}" ]] || fail "Домен не может быть пустым."
-# быстрое примитивное правило
 if ! [[ "${WP_DOMAIN}" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
   fail "Некорректный домен: ${WP_DOMAIN}"
 fi
 
-# ---------- подготовка директории ----------
+# ------------------------ Подготовка рабочей директории ------------------------
 WORKDIR="wp"
 mkdir -p "${WORKDIR}"
 cd "${WORKDIR}"
 
-# ---------- создаём .env с безопасными значениями ----------
-DB_NAME="wordpress"
-DB_USER="wp_user"
-DB_PASSWORD="$(gen_secret)"
-DB_ROOT_PASSWORD="$(gen_secret)"
+# Защитный umask (секреты в .env будут с правами 600 при создании)
+umask 077
 
-TRAEFIK_CERT_RESOLVER="letsencrypt"   # измените при необходимости
-PMA_HOSTNAME="pma.${WP_DOMAIN}"
+# ------------------------ Генерация значений ------------------------
+gen_secret_b64() { openssl rand -base64 48 | tr -d '\n'; }
+gen_secret_hex() { openssl rand -hex 16 | tr -d '\n'; }
 
-# Ключи/соли WordPress
-WP_AUTH_KEY="$(gen_secret)"
-WP_SECURE_AUTH_KEY="$(gen_secret)"
-WP_LOGGED_IN_KEY="$(gen_secret)"
-WP_NONCE_KEY="$(gen_secret)"
-WP_AUTH_SALT="$(gen_secret)"
-WP_SECURE_AUTH_SALT="$(gen_secret)"
-WP_LOGGED_IN_SALT="$(gen_secret)"
-WP_NONCE_SALT="$(gen_secret)"
+# .env: если существует — пополняем недостающими переменными; если нет — создаём
+touch .env
 
-cat > .env <<EOF
-# --- Базовые переменные ---
-WP_DOMAIN=${WP_DOMAIN}
-TRAEFIK_CERT_RESOLVER=${TRAEFIK_CERT_RESOLVER}
+# Функция добавления пары ключ=значение если ещё нет
+put_env_if_absent() {
+  local key="$1" val="$2"
+  if ! grep -qE "^${key}=" .env; then
+    printf "%s=%s\n" "$key" "$val" >> .env
+  fi
+}
 
-# --- База данных ---
-DB_NAME=${DB_NAME}
-DB_USER=${DB_USER}
-DB_PASSWORD=${DB_PASSWORD}
-DB_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
+# Базовые переменные
+put_env_if_absent "WP_DOMAIN"              "${WP_DOMAIN}"
+put_env_if_absent "TRAEFIK_CERT_RESOLVER"  "letsencrypt"
 
-# --- WP Keys & Salts ---
-WP_AUTH_KEY=${WP_AUTH_KEY}
-WP_SECURE_AUTH_KEY=${WP_SECURE_AUTH_KEY}
-WP_LOGGED_IN_KEY=${WP_LOGGED_IN_KEY}
-WP_NONCE_KEY=${WP_NONCE_KEY}
-WP_AUTH_SALT=${WP_AUTH_SALT}
-WP_SECURE_AUTH_SALT=${WP_SECURE_AUTH_SALT}
-WP_LOGGED_IN_SALT=${WP_LOGGED_IN_SALT}
-WP_NONCE_SALT=${WP_NONCE_SALT}
-EOF
+# MariaDB
+put_env_if_absent "DB_NAME"         "wordpress"
+put_env_if_absent "DB_USER"         "wp_user"
+put_env_if_absent "DB_PASSWORD"     "$(gen_secret_b64)"
+put_env_if_absent "DB_ROOT_PASSWORD" "$(gen_secret_b64)"
 
-log "Создан .env с сгенерированными паролями и ключами."
+# WordPress salts/keys
+put_env_if_absent "WP_AUTH_KEY"          "$(gen_secret_b64)"
+put_env_if_absent "WP_SECURE_AUTH_KEY"   "$(gen_secret_b64)"
+put_env_if_absent "WP_LOGGED_IN_KEY"     "$(gen_secret_b64)"
+put_env_if_absent "WP_NONCE_KEY"         "$(gen_secret_b64)"
+put_env_if_absent "WP_AUTH_SALT"         "$(gen_secret_b64)"
+put_env_if_absent "WP_SECURE_AUTH_SALT"  "$(gen_secret_b64)"
+put_env_if_absent "WP_LOGGED_IN_SALT"    "$(gen_secret_b64)"
+put_env_if_absent "WP_NONCE_SALT"        "$(gen_secret_b64)"
 
-# ---------- кладём docker-compose.yml ----------
-# Если файл уже существует, не перезаписываем без согласия.
+# phpMyAdmin BasicAuth:
+# Если не заданы — генерируем логин/пароль и bcrypt-хеш для Traefik basicauth.users
+# Для генерации используем контейнер httpd:2.4-alpine с htpasswd -nbB
+PMA_BASIC_USER_DEFAULT="admin"
+if ! grep -qE "^PMA_BASIC_AUTH_USERS=" .env; then
+  PMA_BASIC_USER="${PMA_BASIC_USER_DEFAULT}"
+  PMA_BASIC_PASS="$(gen_secret_hex)"
+  # создаём bcrypt-хеш; экранируем $ для корректной подстановки в labels
+  PMA_BASIC_HASH="$(docker run --rm httpd:2.4-alpine htpasswd -nbB "${PMA_BASIC_USER}" "${PMA_BASIC_PASS}" | sed -e 's/\$/\$\$/g')"
+  printf "%s=%s\n" "PMA_BASIC_AUTH_USERS" "${PMA_BASIC_HASH}" >> .env
+  printf "%s=%s\n" "PMA_BASIC_AUTH_USER"  "${PMA_BASIC_USER}" >> .env
+  printf "%s=%s\n" "PMA_BASIC_AUTH_PASS"  "${PMA_BASIC_PASS}" >> .env
+fi
+
+# Обновим локальные переменные из .env в окружение скрипта для дальнейшего вывода
+# shellcheck disable=SC2046
+set -a && source .env && set +a
+
+log "Файл .env подготовлен/обновлён."
+
+# ------------------------ docker-compose.yml ------------------------
+compose_needs_write=true
 if [[ -f docker-compose.yml ]]; then
-  read -r -p "Найден существующий docker-compose.yml. Перезаписать? [y/N]: " ow
-  if [[ "${ow:-N}" =~ ^[Yy]$ ]]; then
-    :
-  else
+  read -r -p "Найден docker-compose.yml. Перезаписать его свежей версией? [y/N]: " ow
+  if [[ ! "${ow:-N}" =~ ^[Yy]$ ]]; then
+    compose_needs_write=false
     log "Оставляем существующий docker-compose.yml без изменений."
-    EXISTING_COMPOSE=true
   fi
 fi
 
-if [[ "${EXISTING_COMPOSE:-false}" != "true" ]]; then
+if [[ "${compose_needs_write}" == "true" ]]; then
   cat > docker-compose.yml <<'YAML'
 
 name: wp-stack
@@ -163,6 +177,7 @@ services:
       - "traefik.http.routers.wp.tls=true"
       - "traefik.http.routers.wp.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
 
+      # www -> apex редирект
       - "traefik.http.routers.wp-www.rule=Host(`www.${WP_DOMAIN}`)"
       - "traefik.http.routers.wp-www.entrypoints=websecure"
       - "traefik.http.routers.wp-www.tls=true"
@@ -185,19 +200,19 @@ services:
         condition: service_healthy
     environment:
       - PMA_HOST=db
-      - PMA_ARBITRARY=0           # запрещает подключение к произвольным хостам
+      - PMA_ARBITRARY=0
       - UPLOAD_LIMIT=64M
-      # (опц.) жёстко задаём абсолютный URL, полезно для прокси:
       - PMA_ABSOLUTE_URI=https://pma.${WP_DOMAIN}/
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
+
       - "traefik.http.routers.pma.rule=Host(`pma.${WP_DOMAIN}`)"
       - "traefik.http.routers.pma.entrypoints=websecure"
       - "traefik.http.routers.pma.tls=true"
       - "traefik.http.routers.pma.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
 
-      # --- Basic Auth ---
+      # Basic Auth через Traefik
       - "traefik.http.middlewares.pma-auth.basicauth.users=${PMA_BASIC_AUTH_USERS}"
       - "traefik.http.routers.pma.middlewares=pma-auth@docker"
 
@@ -205,21 +220,54 @@ services:
       - backend
       - proxy
 
+volumes:
+  db_data:
+  wp_data:
+
+networks:
+  backend:
+    name: wp-backend
+    internal: true
+  proxy:
+    external: true
 YAML
-  log "Создан docker-compose.yml."
+  log "Создан свежий docker-compose.yml."
 fi
 
-# ---------- запуск стэка ----------
-log "Выполняю: docker compose pull ..."
+# ------------------------ Запуск стека ------------------------
+log "Загрузка образов (docker compose pull)..."
 docker compose pull
 
-log "Выполняю: docker compose up -d ..."
+log "Старт стека (docker compose up -d)..."
 docker compose up -d
 
-log "Готово!"
+# ------------------------ Вывод итогов ------------------------
+# перечитываем .env на случай, если его правил пользователь
+# shellcheck disable=SC2046
+set -a && source .env && set +a
+
 echo
-echo "WordPress:  https://${WP_DOMAIN}"
-echo "phpMyAdmin: https://pma.${WP_DOMAIN}"
+echo "================= ДАННЫЕ ДЛЯ ВХОДА ================="
+echo "WordPress:"
+echo "  URL: https://${WP_DOMAIN}"
+echo "  DB_HOST: db"
+echo "  DB_NAME: ${DB_NAME}"
+echo "  DB_USER: ${DB_USER}"
+echo "  DB_PASSWORD: ${DB_PASSWORD}"
 echo
-echo "Если DNS уже указывает на ваш сервер и в Traefik настроен резолвер '${TRAEFIK_CERT_RESOLVER}',"
-echo "сертификаты будут выпущены автоматически."
+echo "phpMyAdmin:"
+echo "  URL: https://pma.${WP_DOMAIN}"
+if grep -qE "^PMA_BASIC_AUTH_USER=" .env && grep -qE "^PMA_BASIC_AUTH_PASS=" .env; then
+  echo "  BasicAuth Login: ${PMA_BASIC_AUTH_USER}"
+  echo "  BasicAuth Password: ${PMA_BASIC_AUTH_PASS}"
+else
+  echo "  BasicAuth: уже задан ранее (см. .env: PMA_BASIC_AUTH_USERS)"
+fi
+echo "  DB_USER: ${DB_USER}"
+echo "  DB_PASSWORD: ${DB_PASSWORD}"
+echo "===================================================="
+echo
+echo "Примечание:"
+echo " - Убедитесь, что DNS для ${WP_DOMAIN} и pma.${WP_DOMAIN} указывает на этот сервер."
+echo " - В Traefik должен быть настроен entrypoint 'websecure' и certresolver '${TRAEFIK_CERT_RESOLVER}'."
+echo " - Файл ./wp/.env содержит все секреты (права ограничены). Храните его в надёжном месте."
