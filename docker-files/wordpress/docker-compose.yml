@@ -1,0 +1,106 @@
+
+name: wp-stack
+
+services:
+  db:
+    image: mariadb:11.4
+    container_name: wp-db
+    restart: unless-stopped
+    environment:
+      - MARIADB_DATABASE=${DB_NAME}
+      - MARIADB_USER=${DB_USER}
+      - MARIADB_PASSWORD=${DB_PASSWORD}
+      - MARIADB_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p\"${DB_ROOT_PASSWORD}\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  wordpress:
+    image: wordpress:latest # apache
+    container_name: wp-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - WORDPRESS_DB_HOST=db:3306
+      - WORDPRESS_DB_NAME=${DB_NAME}
+      - WORDPRESS_DB_USER=${DB_USER}
+      - WORDPRESS_DB_PASSWORD=${DB_PASSWORD}
+      # Дополнительно: настроим метод записи файлов для обновлений/плагинов
+      - WORDPRESS_CONFIG_EXTRA=define('FS_METHOD','direct');
+      # Можно закинуть соли/ключи WP через переменные (создаются скриптом):
+      - AUTH_KEY=${WP_AUTH_KEY}
+      - SECURE_AUTH_KEY=${WP_SECURE_AUTH_KEY}
+      - LOGGED_IN_KEY=${WP_LOGGED_IN_KEY}
+      - NONCE_KEY=${WP_NONCE_KEY}
+      - AUTH_SALT=${WP_AUTH_SALT}
+      - SECURE_AUTH_SALT=${WP_SECURE_AUTH_SALT}
+      - LOGGED_IN_SALT=${WP_LOGGED_IN_SALT}
+      - NONCE_SALT=${WP_NONCE_SALT}
+    volumes:
+      - wp_data:/var/www/html
+    labels:
+      - "traefik.enable=true"
+
+      - "traefik.docker.network=proxy"
+
+      - "traefik.http.routers.wp.rule=Host(`${WP_DOMAIN}`)"
+      - "traefik.http.routers.wp.entrypoints=websecure"
+      - "traefik.http.routers.wp.tls=true"
+      - "traefik.http.routers.wp.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+
+      # (опционально) редирект с www -> apex
+      - "traefik.http.routers.wp-www.rule=Host(`www.${WP_DOMAIN}`)"
+      - "traefik.http.routers.wp-www.entrypoints=websecure"
+      - "traefik.http.routers.wp-www.tls=true"
+      - "traefik.http.routers.wp-www.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.middlewares.wp-www-redirect.redirectregex.regex=^https://www\\.(.*)"
+      - "traefik.http.middlewares.wp-www-redirect.redirectregex.replacement=https://$1"
+      - "traefik.http.middlewares.wp-www-redirect.redirectregex.permanent=true"
+      - "traefik.http.routers.wp-www.middlewares=wp-www-redirect@docker"
+
+    networks:
+      - backend
+      - proxy
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: wp-pma
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - PMA_HOST=db
+      - PMA_USER=${DB_USER}
+      - PMA_PASSWORD=${DB_PASSWORD}
+      - UPLOAD_LIMIT=64M
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+
+      - "traefik.http.routers.pma.rule=Host(`pma.${WP_DOMAIN}`)"
+      - "traefik.http.routers.pma.entrypoints=websecure"
+      - "traefik.http.routers.pma.tls=true"
+      - "traefik.http.routers.pma.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+    networks:
+      - backend
+      - proxy
+
+volumes:
+  db_data:
+  wp_data:
+
+networks:
+  backend:
+    name: wp-backend
+    internal: true
+  proxy:
+    external: true
