@@ -2,7 +2,7 @@
 
 set -e
 
-echo "🚀 Полное развертывание n8n с PostgreSQL и Traefik"
+echo "🚀 Безопасное развертывание n8n с Docker Secrets"
 
 # Создаем рабочую директорию
 N8N_DIR="$HOME/n8n"
@@ -10,19 +10,8 @@ echo "📁 Создаем рабочую директорию: $N8N_DIR"
 mkdir -p "$N8N_DIR"
 cd "$N8N_DIR"
 
-# Создаем директорию для секретов
-echo "📂 Создаем директорию для секретов"
-mkdir -p secrets
-
-# Останавливаем и удаляем старые контейнеры
-echo "🧹 Очищаем старые контейнеры и volumes"
-docker compose down -v 2>/dev/null || true
-
-# Удаляем старые volumes чтобы избежать конфликтов
-docker volume rm n8n-postgres-data n8n-app-data 2>/dev/null || true
-
-# Создаем docker-compose.yml с ПРЯМЫМИ переменными (не файловыми секретами)
-echo "📝 Создаем docker-compose.yml"
+# Создаем docker-compose.yml с Docker Secrets
+echo "📝 Создаем docker-compose.yml с Docker Secrets"
 cat > docker-compose.yml << 'EOF'
 services:
   postgres:
@@ -31,10 +20,12 @@ services:
     environment:
       POSTGRES_DB: n8n
       POSTGRES_USER: n8n_user
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    secrets:
+      - postgres_password
     networks:
       - n8n_internal
     healthcheck:
@@ -55,7 +46,7 @@ services:
       DB_POSTGRESDB_PORT: 5432
       DB_POSTGRESDB_DATABASE: n8n
       DB_POSTGRESDB_USER: n8n_user
-      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_POSTGRESDB_PASSWORD_FILE: /run/secrets/postgres_password
       DB_POSTGRESDB_SCHEMA: public
       N8N_HOST: ${N8N_HOST}
       N8N_PORT: 5678
@@ -64,13 +55,15 @@ services:
       NODE_ENV: production
       GENERIC_TIMEZONE: Europe/Moscow
       TZ: Europe/Moscow
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
       N8N_BASIC_AUTH_USER: admin
-      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
-      N8N_DIAGNOSTICS_ENABLED: "false"
-      N8N_PUBLIC_API_DISABLED: "true"
+      N8N_BASIC_AUTH_PASSWORD_FILE: /run/secrets/n8n_auth_password
     volumes:
       - n8n_data:/home/node/.n8n
+    secrets:
+      - postgres_password
+      - n8n_encryption_key
+      - n8n_auth_password
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
@@ -94,9 +87,17 @@ volumes:
     name: n8n-postgres-data
   n8n_data:
     name: n8n-app-data
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  n8n_encryption_key:
+    file: ./secrets/n8n_encryption_key
+  n8n_auth_password:
+    file: ./secrets/n8n_auth_password
 EOF
 
-echo "✅ docker-compose.yml создан"
+echo "✅ docker-compose.yml создан с Docker Secrets"
 
 # Генерируем безопасные пароли и секреты
 echo "🔐 Генерируем безопасные пароли и секреты"
@@ -109,16 +110,11 @@ N8N_BASIC_AUTH_PASSWORD=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-16)
 echo "🌐 Запрос конфигурационной информации"
 read -p "Введите доменное имя для n8n (например: n8n.example.com): " N8N_HOST
 
-# Создаем .env файл со ВСЕМИ переменными (включая секреты)
+# Создаем .env файл только с НЕсекретными переменными
 echo "📝 Создаем .env файл"
 cat > .env << EOF
 # Доменное имя для n8n
 N8N_HOST=${N8N_HOST}
-
-# Секретные переменные
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
 
 # Настройки времени
 GENERIC_TIMEZONE=Europe/Moscow
@@ -127,20 +123,18 @@ EOF
 
 echo "✅ .env файл создан"
 
-# Устанавливаем правильные права доступа
-echo "🔒 Настраиваем права доступа к файлам"
-chmod 600 .env
-chmod 700 secrets
+# Создаем файлы секретов
+echo "📁 Создаем файлы секретов"
+mkdir -p secrets
+echo "$POSTGRES_PASSWORD" > ./secrets/postgres_password
+echo "$N8N_ENCRYPTION_KEY" > ./secrets/n8n_encryption_key
+echo "$N8N_BASIC_AUTH_PASSWORD" > ./secrets/n8n_auth_password
 
-# Проверяем наличие сети proxy
-echo "🌐 Проверяем сеть proxy"
-if ! docker network inspect proxy >/dev/null 2>&1; then
-    echo "❌ Сеть proxy не найдена, создаем..."
-    docker network create proxy
-    echo "✅ Сеть proxy создана"
-else
-    echo "✅ Сеть proxy существует"
-fi
+# Устанавливаем правильные права доступа
+echo "🔒 Настраиваем права доступа"
+chmod 600 .env
+chmod 600 ./secrets/*
+chmod 700 secrets
 
 # Выводим одноразовую информацию
 echo ""
@@ -160,31 +154,23 @@ echo ""
 # Ожидаем подтверждения
 read -p "Нажмите Enter чтобы продолжить..."
 
+# Очищаем переменные с секретами из памяти
+unset POSTGRES_PASSWORD
+unset N8N_ENCRYPTION_KEY
+unset N8N_BASIC_AUTH_PASSWORD
+
+echo "🧹 Секреты удалены из памяти"
+
 # Запускаем docker-compose
 echo "🐳 Запускаем n8n с помощью Docker Compose"
 docker compose up -d
 
-echo "⏳ Ожидаем запуск контейнеров (30 секунд)..."
-sleep 30
+echo "⏳ Ожидаем запуск контейнеров..."
+sleep 10
 
-# Проверяем статус контейнеров
-echo ""
+# Проверяем статус
 echo "📊 Статус контейнеров:"
 docker compose ps
 
-# Проверяем логи n8n для диагностики
-echo ""
-echo "🔍 Проверяем логи n8n:"
-docker compose logs n8n --tail=20
-
 echo ""
 echo "✅ Развертывание завершено!"
-echo "🌐 n8n должен быть доступен по: https://$N8N_HOST"
-echo "⏳ Если это первый запуск, подождите несколько минут пока Traefik получит SSL сертификаты"
-
-echo ""
-echo "📋 Команды для управления:"
-echo "   Просмотр логов: docker compose logs -f"
-echo "   Остановка: docker compose down"
-echo "   Перезапуск: docker compose restart"
-echo "   Обновление: docker compose pull && docker compose up -d"
