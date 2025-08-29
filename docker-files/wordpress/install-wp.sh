@@ -105,12 +105,22 @@ put_env_if_absent "PMA_BASIC_AUTH_PASS"  "$(gen_secret_hex)"
 # shellcheck disable=SC2046
 set -a && source .env && set +a
 
-# Сгенерируем файл auth/.htpasswd (bcrypt, cost=10) внутри контейнера Alpine
-# Устанавливаем apache2-utils (в нём есть htpasswd) и генерируем файл.
-docker run --rm -v "$PWD/auth:/work" alpine:3 sh -c \
-  "apk add --no-cache apache2-utils >/dev/null && htpasswd -nbBC 10 '${PMA_BASIC_AUTH_USER}' '${PMA_BASIC_AUTH_PASS}' > /work/.htpasswd"
+# Создадим файл auth/.htpasswd (bcrypt, cost=10) внутри контейнера Alpine
+# ВАЖНО: после генерации делаем chown на UID/GID текущего пользователя хоста,
+# чтобы chmod/редакция файла не падали с "Operation not permitted".
+TARGET_UID="$(id -u)"
+TARGET_GID="$(id -g)"
+docker run --rm -v "$PWD/auth:/work" \
+  -e TARGET_UID="$TARGET_UID" -e TARGET_GID="$TARGET_GID" \
+  alpine:3 sh -c "
+    apk add --no-cache apache2-utils >/dev/null &&
+    htpasswd -nbBC 10 '${PMA_BASIC_AUTH_USER}' '${PMA_BASIC_AUTH_PASS}' > /work/.htpasswd &&
+    chown \$TARGET_UID:\$TARGET_GID /work/.htpasswd
+  "
 
-chmod 600 auth/.htpasswd
+# Права могут не применяться на некоторых FS (например, CIFS). Не роняем скрипт.
+chmod 600 auth/.htpasswd || warn "Не удалось изменить права auth/.htpasswd — продолжаю."
+
 log "Файл auth/.htpasswd создан. Данные BasicAuth (логин/пароль) сохранены в .env."
 
 # ------------------------ docker-compose.yml ------------------------
@@ -125,6 +135,7 @@ fi
 
 if [[ "${compose_needs_write}" == "true" ]]; then
   cat > docker-compose.yml <<'YAML'
+version: "3.9"
 
 name: wp-stack
 
