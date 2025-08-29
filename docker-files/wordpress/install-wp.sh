@@ -137,7 +137,7 @@ name: wp-stack
 
 services:
   db:
-    image: mariadb:11.4
+    image: mariadb:11.8
     container_name: wp-db
     restart: unless-stopped
     environment:
@@ -156,7 +156,7 @@ services:
       - backend
 
   wordpress:
-    image: wordpress:latest
+    image: wordpress:php8.4-apache
     container_name: wp-app
     restart: unless-stopped
     depends_on:
