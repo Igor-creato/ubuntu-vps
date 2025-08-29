@@ -249,9 +249,17 @@ EOF
     # Создание docker-compose.override.yml для Traefik
     print_info "Создание конфигурации для Traefik..."
     
-   cat > docker-compose.override.yml << EOF
+    cat > docker-compose.override.yml << EOF
+version: "3.8"
 
 services:
+  # Отключаем vector так как аналитика отключена
+  vector:
+    profiles:
+      - analytics
+    deploy:
+      replicas: 0
+
   studio:
     labels:
       - traefik.enable=true
