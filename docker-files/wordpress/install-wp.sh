@@ -132,7 +132,6 @@ fi
 
 if [[ "${compose_needs_write}" == "true" ]]; then
   cat > docker-compose.yml.tpl <<'YAML'
-version: "3.9"
 
 name: wp-stack
 
@@ -214,7 +213,7 @@ services:
       - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
       - "traefik.http.middlewares.https-redirect.redirectscheme.permanent=true"
       - "traefik.http.middlewares.wp-www-redirect.redirectregex.regex=^https?://www\\.(.*)"
-      - "traefik.http.middlewares.wp-www-redirect.redirectregex.replacement=https://\$1"
+      - "traefik.http.middlewares.wp-www-redirect.redirectregex.replacement=https://$1"
       - "traefik.http.middlewares.wp-www-redirect.redirectregex.permanent=true"
 
     networks:
