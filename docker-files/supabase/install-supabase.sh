@@ -249,17 +249,9 @@ EOF
     # Создание docker-compose.override.yml для Traefik
     print_info "Создание конфигурации для Traefik..."
     
-       cat > docker-compose.override.yml << EOF
-version: "3.8"
+   cat > docker-compose.override.yml << EOF
 
 services:
-  db:
-    ports:
-      - "${POSTGRES_PORT}:5432"  # Проброс измененного порта
-    networks:
-      - default
-      - proxy
-
   studio:
     labels:
       - traefik.enable=true
