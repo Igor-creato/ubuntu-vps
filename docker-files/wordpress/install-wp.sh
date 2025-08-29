@@ -29,8 +29,8 @@ if ! docker compose version >/dev/null 2>&1; then
   fail "Плагин 'docker compose' не найден. Установите Docker Compose v2."
 fi
 
-# Тихо подтянем образ для генерации htpasswd
-docker pull httpd:2.4-alpine >/dev/null || warn "Не удалось заранее подтянуть httpd:2.4-alpine — будет скачан на лету."
+# Тихо подтянем базовый образ (для генерации htpasswd внутри контейнера)
+docker pull alpine:3 >/dev/null || warn "Не удалось заранее подтянуть alpine:3 — будет скачан на лету."
 
 # ------------------------ Сеть proxy (Traefik) ------------------------
 ensure_proxy_network() {
@@ -96,28 +96,21 @@ put_env_if_absent "WP_LOGGED_IN_SALT"    "$(gen_secret_b64)"
 put_env_if_absent "WP_NONCE_SALT"        "$(gen_secret_b64)"
 
 # ------------------------ Basic Auth через файл ------------------------
-# Создадим каталог для htpasswd и сгенерируем логин/пароль (сохраним для вывода)
 mkdir -p auth
-PMA_BASIC_USER_DEFAULT="admin"
-# Если пользователь/пароль ещё не записаны в .env — сгенерируем и сохраним (без хеша)
-if ! grep -qE "^PMA_BASIC_AUTH_USER=" .env; then
-  put_env_if_absent "PMA_BASIC_AUTH_USER"  "${PMA_BASIC_USER_DEFAULT}"
-fi
-if ! grep -qE "^PMA_BASIC_AUTH_PASS=" .env; then
-  put_env_if_absent "PMA_BASIC_AUTH_PASS"  "$(gen_secret_hex)"
-fi
+# Сохраним user/pass в .env (для удобного вывода в конце)
+put_env_if_absent "PMA_BASIC_AUTH_USER"  "admin"
+put_env_if_absent "PMA_BASIC_AUTH_PASS"  "$(gen_secret_hex)"
 
 # Поднимем переменные окружения из .env
 # shellcheck disable=SC2046
 set -a && source .env && set +a
 
-# Создадим/пересоздадим файл auth/.htpasswd (bcrypt, cost=10)
-docker run --rm -v "$PWD/auth:/work" httpd:2.4-alpine \
-  sh -lc "htpasswd -nbBC 10 '${PMA_BASIC_AUTH_USER}' '${PMA_BASIC_AUTH_PASS}' > /work/.htpasswd"
+# Сгенерируем файл auth/.htpasswd (bcrypt, cost=10) внутри контейнера Alpine
+# Устанавливаем apache2-utils (в нём есть htpasswd) и генерируем файл.
+docker run --rm -v "$PWD/auth:/work" alpine:3 sh -c \
+  "apk add --no-cache apache2-utils >/dev/null && htpasswd -nbBC 10 '${PMA_BASIC_AUTH_USER}' '${PMA_BASIC_AUTH_PASS}' > /work/.htpasswd"
 
-# Дополнительно ограничим права файла
 chmod 600 auth/.htpasswd
-
 log "Файл auth/.htpasswd создан. Данные BasicAuth (логин/пароль) сохранены в .env."
 
 # ------------------------ docker-compose.yml ------------------------
