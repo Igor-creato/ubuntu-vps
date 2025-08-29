@@ -106,8 +106,7 @@ put_env_if_absent "PMA_BASIC_AUTH_PASS"  "$(gen_secret_hex)"
 set -a && source .env && set +a
 
 # Создадим файл auth/.htpasswd (bcrypt, cost=10) внутри контейнера Alpine
-# ВАЖНО: после генерации делаем chown на UID/GID текущего пользователя хоста,
-# чтобы chmod/редакция файла не падали с "Operation not permitted".
+# После генерации делаем chown на UID/GID текущего пользователя хоста.
 TARGET_UID="$(id -u)"
 TARGET_GID="$(id -g)"
 docker run --rm -v "$PWD/auth:/work" \
@@ -118,9 +117,7 @@ docker run --rm -v "$PWD/auth:/work" \
     chown \$TARGET_UID:\$TARGET_GID /work/.htpasswd
   "
 
-# Права могут не применяться на некоторых FS (например, CIFS). Не роняем скрипт.
 chmod 600 auth/.htpasswd || warn "Не удалось изменить права auth/.htpasswd — продолжаю."
-
 log "Файл auth/.htpasswd создан. Данные BasicAuth (логин/пароль) сохранены в .env."
 
 # ------------------------ docker-compose.yml ------------------------
@@ -185,20 +182,39 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
 
+      # ===== HTTPS (основной сайт) =====
       - "traefik.http.routers.wp.rule=Host(`${WP_DOMAIN}`)"
       - "traefik.http.routers.wp.entrypoints=websecure"
       - "traefik.http.routers.wp.tls=true"
       - "traefik.http.routers.wp.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.routers.wp.service=wp"
+      - "traefik.http.services.wp.loadbalancer.server.port=80"
 
-      # www -> apex редирект
+      # ===== HTTP → HTTPS редирект (убирает 404 на http://) =====
+      - "traefik.http.routers.wp-http.rule=Host(`${WP_DOMAIN}`)"
+      - "traefik.http.routers.wp-http.entrypoints=web"
+      - "traefik.http.routers.wp-http.middlewares=https-redirect@docker"
+      - "traefik.http.routers.wp-http.service=wp"
+
+      # ===== www → apex редирект (для HTTPS) =====
       - "traefik.http.routers.wp-www.rule=Host(`www.${WP_DOMAIN}`)"
       - "traefik.http.routers.wp-www.entrypoints=websecure"
       - "traefik.http.routers.wp-www.tls=true"
       - "traefik.http.routers.wp-www.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
-      - "traefik.http.middlewares.wp-www-redirect.redirectregex.regex=^https://www\\.(.*)"
+      - "traefik.http.routers.wp-www.middlewares=wp-www-redirect@docker"
+      - "traefik.http.routers.wp-www.service=wp"
+
+      # ===== www → apex редирект (для HTTP) =====
+      - "traefik.http.routers.wp-www-http.rule=Host(`www.${WP_DOMAIN}`)"
+      - "traefik.http.routers.wp-www-http.entrypoints=web"
+      - "traefik.http.routers.wp-www-http.middlewares=wp-www-redirect@docker"
+
+      # ===== Общие middleware =====
+      - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.https-redirect.redirectscheme.permanent=true"
+      - "traefik.http.middlewares.wp-www-redirect.redirectregex.regex=^https?://www\\.(.*)"
       - "traefik.http.middlewares.wp-www-redirect.redirectregex.replacement=https://$1"
       - "traefik.http.middlewares.wp-www-redirect.redirectregex.permanent=true"
-      - "traefik.http.routers.wp-www.middlewares=wp-www-redirect@docker"
 
     networks:
       - backend
@@ -220,12 +236,21 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
 
+      # ===== HTTPS =====
       - "traefik.http.routers.pma.rule=Host(`pma.${WP_DOMAIN}`)"
       - "traefik.http.routers.pma.entrypoints=websecure"
       - "traefik.http.routers.pma.tls=true"
       - "traefik.http.routers.pma.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.routers.pma.service=pma"
+      - "traefik.http.services.pma.loadbalancer.server.port=80"
 
-      # Basic Auth через файл (устойчиво к '$')
+      # ===== HTTP → HTTPS редирект =====
+      - "traefik.http.routers.pma-http.rule=Host(`pma.${WP_DOMAIN}`)"
+      - "traefik.http.routers.pma-http.entrypoints=web"
+      - "traefik.http.routers.pma-http.middlewares=https-redirect@docker"
+      - "traefik.http.routers.pma-http.service=pma"
+
+      # ===== Basic Auth через файл =====
       - "traefik.http.middlewares.pma-auth.basicauth.usersfile=/auth/.htpasswd"
       - "traefik.http.routers.pma.middlewares=pma-auth@docker"
 
@@ -281,5 +306,5 @@ echo "===================================================="
 echo
 echo "Примечания:"
 echo " - Убедитесь, что DNS для ${WP_DOMAIN} и pma.${WP_DOMAIN} указывает на этот сервер."
-echo " - В Traefik должен быть entrypoint 'websecure' и certresolver '${TRAEFIK_CERT_RESOLVER}'."
+echo " - В Traefik должны существовать entrypoints 'web' (80) и 'websecure' (443), а также certresolver '${TRAEFIK_CERT_RESOLVER}'."
 echo " - Файл ./wp/.env содержит секреты; ./wp/auth/.htpasswd — файл хешей для BasicAuth (read-only в контейнере)."
