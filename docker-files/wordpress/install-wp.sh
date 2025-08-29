@@ -256,7 +256,6 @@ services:
       - "traefik.http.routers.pma.middlewares=pma-auth@docker"
 
     volumes:
-      - wp_data:/var/www/html
       - ./auth:/auth:ro
     networks:
       - backend
