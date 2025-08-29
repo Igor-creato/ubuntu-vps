@@ -210,11 +210,12 @@ services:
       - "traefik.http.routers.wp-www-http.middlewares=wp-www-redirect@docker"
 
       # ===== Общие middleware =====
-      - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
-      - "traefik.http.middlewares.https-redirect.redirectscheme.permanent=true"
-      - "traefik.http.middlewares.wp-www-redirect.redirectregex.regex=^https?://www\\.(.*)"
-      - "traefik.http.middlewares.wp-www-redirect.redirectregex.replacement=https://$1"
-      - "traefik.http.middlewares.wp-www-redirect.redirectregex.permanent=true"
+      - 'traefik.http.middlewares.https-redirect.redirectscheme.scheme=https'
+      - 'traefik.http.middlewares.https-redirect.redirectscheme.permanent=true'
+      - 'traefik.http.middlewares.wp-www-redirect.redirectregex.regex=^https?://www\\.(.*)'
+      - 'traefik.http.middlewares.wp-www-redirect.redirectregex.replacement=https://$1'
+      - 'traefik.http.middlewares.wp-www-redirect.redirectregex.permanent=true'
+
 
     networks:
       - backend
