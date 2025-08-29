@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 # install-supabase-traefik.sh
-# Автонастройка self-hosted Supabase (full stack) + Traefik (внешняя сеть proxy) + доступ к PgBouncer для n8n.
-# - Клонирует официальную репу Supabase и копирует ./docker/* в ./supabase
-# - Генерирует .env по docker/.env.example (JWT, anon/service ключи, пароли)
+# Автонастройка self-hosted Supabase (full stack) + Traefik (внешняя сеть proxy) + доступ к пулеру для n8n.
+# - Клонирует официальную репозиторий Supabase и копирует ./docker/* в ./supabase
+# - Генерирует .env из docker/.env.example (JWT, anon/service ключи, пароли)
 # - Создаёт override docker-compose.traefik.yml:
 #     * Traefik-лейблы для шлюза (kong)
-#     * Подключение pgbouncer к внешней сети 'proxy' (без публикации портов)
+#     * Подключение пулера (supavisor/pooler/pgbouncer) к внешней сети 'proxy' (без публикации портов)
 # - Запускает docker compose (pull + up -d)
 #
 # Требования: docker, "docker compose" (plugin), git, openssl, sed, awk
-# OS: Ubuntu 22.04+ (проверено)
+# ОС: Ubuntu 22.04+ (проверено)
 
 set -Eeuo pipefail
 
 ### ========= Конфиг по умолчанию =========
 PROJECT_DIR="${PWD}/supabase"           # куда сложим compose и .env
 REPO_URL="https://github.com/supabase/supabase.git"
-TRAEFIK_NETWORK="proxy"                 # внешняя сеть traefik (общая с n8n)
-ROUTER_NAME="supabase"                  # имя роутера/сервиса в Traefik
+TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-proxy}"   # внешняя сеть traefik (общая с n8n)
+ROUTER_NAME="${ROUTER_NAME:-supabase}"        # имя роутера/сервиса в Traefik
 KONG_HTTP_PORT_DEFAULT="8000"
 KONG_HTTPS_PORT_DEFAULT="8443"
+TRAEFIK_CERT_RESOLVER="${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
 
 ### ========= Утилиты/проверки =========
 fail() { echo "[ERROR] $*" >&2; exit 1; }
@@ -39,9 +40,6 @@ echo "Введите домен для Дашборда Supabase (FQDN), нап�
 read -r -p "Домен: " DASHBOARD_FQDN
 [[ -n "${DASHBOARD_FQDN// }" ]] || fail "Домен не может быть пустым."
 DASHBOARD_FQDN="${DASHBOARD_FQDN,,}"   # в нижний регистр
-
-# certresolver в Traefik. По-умолчанию — letsencrypt (как в твоём Traefik compose).
-TRAEFIK_CERT_RESOLVER="${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
 
 ### ========= Проверка внешней сети Traefik =========
 if ! docker network ls --format '{{.Name}}' | grep -qx "${TRAEFIK_NETWORK}"; then
@@ -63,47 +61,35 @@ cp -R "$TMP_DIR/supabase/docker/." "$PROJECT_DIR/"
 
 cd "$PROJECT_DIR"
 
-# Определяем, как называется пулер в этом compose: supavisor / pooler / pgbouncer
+### ========= Определяем сервис пулера (supavisor/pooler/pgbouncer) =========
 detect_pooler() {
   local name=""
-  if grep -qE '^\s*supavisor:\s*$' docker-compose.yml; then
+  # читаем из только что скопированного docker-compose.yml
+  if grep -qE '^[[:space:]]*supavisor:[[:space:]]*$' docker-compose.yml; then
     name="supavisor"
-  elif grep -qE '^\s*pooler:\s*$' docker-compose.yml; then
+  elif grep -qE '^[[:space:]]*pooler:[[:space:]]*$' docker-compose.yml; then
     name="pooler"
-  elif grep -qE '^\s*pgbouncer:\s*$' docker-compose.yml; then
+  elif grep -qE '^[[:space:]]*pgbouncer:[[:space:]]*$' docker-compose.yml; then
     name="pgbouncer"
   fi
   printf '%s' "$name"
 }
-
 POOLER_SERVICE="$(detect_pooler)"
 [[ -n "$POOLER_SERVICE" ]] || fail "Не найден сервис пулера (supavisor/pooler/pgbouncer) в docker-compose.yml"
 
-# Порты и формат логина для разных пулеров
-case "$POOLER_SERVICE" in
-  supavisor|pooler)
-    POOLER_HOST="$POOLER_SERVICE"
-    POOLER_PORT_SESSION=5432
-    POOLER_PORT_TX=6543
-    POOLER_USER="postgres.${POOLER_TENANT_ID}"   # важно для Supavisor
-    ;;
-  pgbouncer)
-    POOLER_HOST="pgbouncer"
-    POOLER_PORT_SESSION=6432
-    POOLER_PORT_TX=""
-    POOLER_USER="postgres"
-    ;;
-esac
-
-
 ### ========= Работа с .env (на базе .env.example) =========
 [[ -f ".env.example" ]] || [[ -f ".env" ]] || fail ".env.example не найден в $PROJECT_DIR"
-if [[ -f ".env.example" ]]; then
-  cp -f .env.example .env
-else
+
+# если .env уже существует от прошлого запуска — сохраним и прочитаем старый POOLER_TENANT_ID
+OLD_TENANT=""
+if [[ -f ".env" ]]; then
+  echo "[INFO] Найден существующий .env — сделаю бэкап и постараюсь сохранить POOLER_TENANT_ID"
   cp -f .env ".env.backup.$(date +%Y%m%d-%H%M%S)"
+  OLD_TENANT="$(grep -E '^POOLER_TENANT_ID=' .env | cut -d= -f2- || true)"
 fi
 
+# создаём свежий .env на базе примера
+cp -f .env.example .env
 umask 077
 
 # Утилиты генерации
@@ -124,12 +110,11 @@ make_jwt() {
   printf '%s.%s.%s' "$header_b64" "$payload_b64" "$sign"
 }
 
-# set_env VAR VAL
+# Надёжная функция записи/обновления VAR=VALUE
 set_env() {
-  local var="$1" val="$2" esc
-  esc="$(printf '%s' "$val" | sed -e 's/[&/\]/\\&/g')"
+  local var="$1" val="$2"
   if grep -qE "^${var}=" .env; then
-    sed -i -E "s|^${var}=.*|${var}=${esc}|" .env
+    awk -v k="$var" -v v="$val" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v} {print}' .env > .env.tmp && mv .env.tmp .env
   else
     printf '%s=%s\n' "$var" "$val" >> .env
   fi
@@ -147,10 +132,12 @@ DASHBOARD_PASSWORD="$(rand_b64url 24)"
 
 SUPABASE_URL_EXTERNAL="https://${DASHBOARD_FQDN}"
 
-POOLER_TENANT_ID="tenant-$(rand_hex 4)"
+# Если был старый tenant — используем его, иначе сгенерируем новый
+POOLER_TENANT_ID="${OLD_TENANT:-tenant-$(rand_hex 4)}"
 SECRET_KEY_BASE="$(rand_hex 32)"
 LOGFLARE_PRIVATE_ACCESS_TOKEN="$(rand_hex 16)"
 
+# Запись переменных в .env
 set_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
 set_env "JWT_SECRET" "$JWT_SECRET"
 set_env "ANON_KEY" "$ANON_KEY"
@@ -170,12 +157,12 @@ set_env "LOGFLARE_PRIVATE_ACCESS_TOKEN" "$LOGFLARE_PRIVATE_ACCESS_TOKEN"
 set_env "KONG_HTTP_PORT" "$KONG_HTTP_PORT_DEFAULT"
 set_env "KONG_HTTPS_PORT" "$KONG_HTTPS_PORT_DEFAULT"
 
-### ========= Traefik + PgBouncer override =========
-# kong — публикуем через Traefik; pgbouncer — просто присоединяем к внешней сети 'proxy'
+### ========= Traefik + пулер override =========
+# kong — публикуем через Traefik; пулер — просто присоединяем к внешней сети 'proxy'
 cat > docker-compose.traefik.yml <<YAML
 services:
   kong:
-    ports: []
+    ports: []   # без публикации портов (Traefik терминирует снаружи)
     networks:
       - default
       - ${TRAEFIK_NETWORK}
@@ -188,7 +175,7 @@ services:
       - "traefik.http.routers.${ROUTER_NAME}.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.services.${ROUTER_NAME}.loadbalancer.server.port=${KONG_HTTP_PORT_DEFAULT}"
 
-  ${POOLER_SERVICE}:          # <-- вместо "pgbouncer"
+  ${POOLER_SERVICE}:
     networks:
       - default
       - ${TRAEFIK_NETWORK}
@@ -202,8 +189,27 @@ YAML
 echo "[INFO] Тяну образы..."
 docker compose pull
 
-echo "[INFO] Запускаю Supabase стек (с override Traefik/PgBouncer)..."
+echo "[INFO] Запускаю Supabase стек (с override Traefik/пулер)..."
 docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
+
+### ========= Итог/подсказки =========
+# Рассчитываем логин/порты для подсказки подключения n8n
+POOLER_HOST="$POOLER_SERVICE"
+POOLER_PORT_SESSION=0
+POOLER_PORT_TX=""
+POOLER_USER=""
+
+case "$POOLER_SERVICE" in
+  supavisor|pooler)
+    POOLER_PORT_SESSION=5432
+    POOLER_PORT_TX=6543
+    POOLER_USER="postgres.${POOLER_TENANT_ID}"
+    ;;
+  pgbouncer)
+    POOLER_PORT_SESSION=6432
+    POOLER_USER="postgres"
+    ;;
+esac
 
 echo
 echo "================= ГОТОВО ================="
@@ -214,19 +220,26 @@ echo "JWT secret:      ${JWT_SECRET}"
 echo "anon key:        ${ANON_KEY}"
 echo "service key:     ${SERVICE_ROLE_KEY}"
 echo
-echo "Postgres (внутри docker-сети):"
-echo
 echo "n8n → Supabase через пулер (сеть '${TRAEFIK_NETWORK}'):"
 echo "  Host:          ${POOLER_HOST}"
 echo "  Port (session):${POOLER_PORT_SESSION}"
-[[ -n "${POOLER_PORT_TX:-}" ]] && echo "  Port (tx):     ${POOLER_PORT_TX}"
+[[ -n "${POOLER_PORT_TX}" ]] && echo "  Port (tx):     ${POOLER_PORT_TX}"
 echo "  DB:            postgres"
 echo "  User:          ${POOLER_USER}"
 echo "  Password:      ${POSTGRES_PASSWORD}"
-
 if [[ "$POOLER_SERVICE" = "supavisor" || "$POOLER_SERVICE" = "pooler" ]]; then
   echo "  DSN (session):  postgresql://${POOLER_USER}:${POSTGRES_PASSWORD}@${POOLER_HOST}:${POOLER_PORT_SESSION}/postgres?sslmode=disable"
   echo "  DSN (tx):       postgresql://${POOLER_USER}:${POSTGRES_PASSWORD}@${POOLER_HOST}:${POOLER_PORT_TX}/postgres?sslmode=disable"
 else
   echo "  DSN:            postgresql://${POOLER_USER}:${POSTGRES_PASSWORD}@${POOLER_HOST}:${POOLER_PORT_SESSION}/postgres?sslmode=disable"
 fi
+echo
+echo "Файлы:"
+echo "  compose:       ${PROJECT_DIR}/docker-compose.yml (+ docker-compose.traefik.yml)"
+echo "  env:           ${PROJECT_DIR}/.env"
+echo
+echo "Подсказки:"
+echo "  - Подключи сервис n8n к внешней сети '${TRAEFIK_NETWORK}' и используй Host '${POOLER_HOST}'."
+echo "  - Имя certresolver в Traefik-лейблах должно совпадать с твоей конфигурацией Traefik."
+echo "  - Убедись, что у 'kong' и у '${POOLER_SERVICE}' НЕТ опубликованных портов на хост."
+echo "=========================================="
