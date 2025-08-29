@@ -215,24 +215,18 @@ echo "anon key:        ${ANON_KEY}"
 echo "service key:     ${SERVICE_ROLE_KEY}"
 echo
 echo "Postgres (внутри docker-сети):"
-echo "  роль:          postgres"
-echo "  пароль:        ${POSTGRES_PASSWORD}"
-echo "  доступ:        через PgBouncer (prod-подход), без публикации наружу"
 echo
-echo "n8n → Supabase через PgBouncer (сеть '${TRAEFIK_NETWORK}'):"
-echo "  Host:          pgbouncer"
-echo "  Port:          6432"
+echo "n8n → Supabase через пулер (сеть '${TRAEFIK_NETWORK}'):"
+echo "  Host:          ${POOLER_HOST}"
+echo "  Port (session):${POOLER_PORT_SESSION}"
+[[ -n "${POOLER_PORT_TX:-}" ]] && echo "  Port (tx):     ${POOLER_PORT_TX}"
 echo "  DB:            postgres"
-echo "  User:          postgres"
+echo "  User:          ${POOLER_USER}"
 echo "  Password:      ${POSTGRES_PASSWORD}"
-echo "  DSN:           postgresql://postgres:${POSTGRES_PASSWORD}@pgbouncer:6432/postgres?sslmode=disable"
-echo
-echo "Файлы:"
-echo "  compose:       ${PROJECT_DIR}/docker-compose.yml (+ docker-compose.traefik.yml)"
-echo "  env:           ${PROJECT_DIR}/.env"
-echo
-echo "Подсказки:"
-echo "  - Контейнеры в РАЗНЫХ compose-проектах видят друг друга в общей внешней сети '${TRAEFIK_NETWORK}'."
-echo "  - В compose n8n добавь: networks: [${TRAEFIK_NETWORK}] и используй Host 'pgbouncer'."
-echo "  - Проверь, что у 'kong' и 'pgbouncer' НЕТ опубликованных портов на хост."
-echo "=========================================="
+
+if [[ "$POOLER_SERVICE" = "supavisor" || "$POOLER_SERVICE" = "pooler" ]]; then
+  echo "  DSN (session):  postgresql://${POOLER_USER}:${POSTGRES_PASSWORD}@${POOLER_HOST}:${POOLER_PORT_SESSION}/postgres?sslmode=disable"
+  echo "  DSN (tx):       postgresql://${POOLER_USER}:${POSTGRES_PASSWORD}@${POOLER_HOST}:${POOLER_PORT_TX}/postgres?sslmode=disable"
+else
+  echo "  DSN:            postgresql://${POOLER_USER}:${POSTGRES_PASSWORD}@${POOLER_HOST}:${POOLER_PORT_SESSION}/postgres?sslmode=disable"
+fi
