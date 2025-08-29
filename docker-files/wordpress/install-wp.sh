@@ -135,7 +135,6 @@ fi
 
 if [[ "${compose_needs_write}" == "true" ]]; then
   cat > docker-compose.yml <<'YAML'
-version: "3.9"
 
 name: wp-stack
 
