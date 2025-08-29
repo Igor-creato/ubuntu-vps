@@ -25,6 +25,9 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      - HTTP_PROXY=http://xray-client:3128
+      - HTTPS_PROXY=http://xray-client:3128
+      - NO_PROXY=localhost,127.0.0.1,::1,n8n,n8n-n8n-1,traefik,traefik-traefik-1,postgres,n8n-postgres-1,wp-app,wp-db,wp-pma,supabase-db,supabase-pooler,supabase-auth,supabase-rest,supabase-realtime,supabase-storage,supabase-studio,supabase-meta,supabase-edge-functions,supabase-analytics,supabase-imgproxy,supabase-vector,supabase-kong,realtime-dev.supabase-realtime
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
