@@ -45,8 +45,7 @@ read -r -p "Домен: " DASHBOARD_FQDN
 DASHBOARD_FQDN="${DASHBOARD_FQDN,,}"   # в нижний регистр
 
 # (опционально) задать certresolver, если в Traefik он назван не по-умолчанию.
-read -r -p "Имя TLS certresolver для Traefik (Enter — пропустить): " TRAEFIK_CERT_RESOLVER
-TRAEFIK_CERT_RESOLVER="${TRAEFIK_CERT_RESOLVER:-$DEFAULT_RESOLVER}"
+TRAEFIK_CERT_RESOLVER="${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
 
 ### ========= Проверка внешней сети Traefik =========
 if ! docker network ls --format '{{.Name}}' | grep -qx "${TRAEFIK_NETWORK}"; then
@@ -184,7 +183,7 @@ services:
       - "traefik.http.routers.${ROUTER_NAME}.rule=Host(\`${DASHBOARD_FQDN}\`)"
       - "traefik.http.routers.${ROUTER_NAME}.entrypoints=websecure"
       - "traefik.http.routers.${ROUTER_NAME}.tls=true"
-      - "traefik.http.routers.${ROUTER_NAME}.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.${ROUTER_NAME}.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.services.${ROUTER_NAME}.loadbalancer.server.port=${KONG_HTTP_PORT_DEFAULT}"
 YAML
 
