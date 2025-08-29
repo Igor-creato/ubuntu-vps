@@ -181,7 +181,6 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=${TRAEFIK_NETWORK}"
-
       - "traefik.http.routers.${ROUTER_NAME}.rule=Host(\`${DASHBOARD_FQDN}\`)"
       - "traefik.http.routers.${ROUTER_NAME}.entrypoints=websecure"
       - "traefik.http.routers.${ROUTER_NAME}.tls=true"
