@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # install-wp.sh — Установка WordPress + MariaDB + phpMyAdmin за Traefik (external network: proxy)
 # ОС: Ubuntu 22.04+ / Linux. Требуется Docker Engine и плагин docker compose v2.
-# Автор: devops-setup
+# Особенности:
+#  - Traefik уже запущен отдельно и использует внешнюю сеть "proxy".
+#  - phpMyAdmin защищён Basic Auth через файл (/auth/.htpasswd) — без подстановок $, надёжно.
+#  - Секреты (MariaDB, WP salts) и удобные поля (логин/пароль BasicAuth) пишутся в ./wp/.env.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -17,14 +20,17 @@ on_err() {
 }
 trap on_err ERR
 
-# ------------------------ Проверки окружения ------------------------
 need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Не найдена команда '$1'. Установите и повторите."; }
 
+# ------------------------ Проверки окружения ------------------------
 need_cmd docker
 need_cmd openssl
 if ! docker compose version >/dev/null 2>&1; then
   fail "Плагин 'docker compose' не найден. Установите Docker Compose v2."
 fi
+
+# Тихо подтянем образ для генерации htpasswd
+docker pull httpd:2.4-alpine >/dev/null || warn "Не удалось заранее подтянуть httpd:2.4-alpine — будет скачан на лету."
 
 # ------------------------ Сеть proxy (Traefik) ------------------------
 ensure_proxy_network() {
@@ -34,7 +40,7 @@ ensure_proxy_network() {
       docker network create proxy >/dev/null || fail "Не удалось создать сеть 'proxy'."
       log "Создана внешняя сеть 'proxy'."
     else
-      fail "Нужна внешняя сеть 'proxy'. Создайте её: docker network create proxy"
+      fail "Нужна внешняя сеть 'proxy'. Создайте: docker network create proxy"
     fi
   fi
 }
@@ -52,17 +58,16 @@ WORKDIR="wp"
 mkdir -p "${WORKDIR}"
 cd "${WORKDIR}"
 
-# Защитный umask (секреты в .env будут с правами 600 при создании)
+# Защитный umask: секреты получат 600/700
 umask 077
 
 # ------------------------ Генерация значений ------------------------
 gen_secret_b64() { openssl rand -base64 48 | tr -d '\n'; }
 gen_secret_hex() { openssl rand -hex 16 | tr -d '\n'; }
 
-# .env: если существует — пополняем недостающими переменными; если нет — создаём
+# .env: если есть — дополним, если нет — создадим
 touch .env
 
-# Функция добавления пары ключ=значение если ещё нет
 put_env_if_absent() {
   local key="$1" val="$2"
   if ! grep -qE "^${key}=" .env; then
@@ -75,9 +80,9 @@ put_env_if_absent "WP_DOMAIN"              "${WP_DOMAIN}"
 put_env_if_absent "TRAEFIK_CERT_RESOLVER"  "letsencrypt"
 
 # MariaDB
-put_env_if_absent "DB_NAME"         "wordpress"
-put_env_if_absent "DB_USER"         "wp_user"
-put_env_if_absent "DB_PASSWORD"     "$(gen_secret_b64)"
+put_env_if_absent "DB_NAME"          "wordpress"
+put_env_if_absent "DB_USER"          "wp_user"
+put_env_if_absent "DB_PASSWORD"      "$(gen_secret_b64)"
 put_env_if_absent "DB_ROOT_PASSWORD" "$(gen_secret_b64)"
 
 # WordPress salts/keys
@@ -90,30 +95,35 @@ put_env_if_absent "WP_SECURE_AUTH_SALT"  "$(gen_secret_b64)"
 put_env_if_absent "WP_LOGGED_IN_SALT"    "$(gen_secret_b64)"
 put_env_if_absent "WP_NONCE_SALT"        "$(gen_secret_b64)"
 
-# phpMyAdmin BasicAuth:
-# Если не заданы — генерируем логин/пароль и bcrypt-хеш для Traefik basicauth.users
-# Для генерации используем контейнер httpd:2.4-alpine с htpasswd -nbB
+# ------------------------ Basic Auth через файл ------------------------
+# Создадим каталог для htpasswd и сгенерируем логин/пароль (сохраним для вывода)
+mkdir -p auth
 PMA_BASIC_USER_DEFAULT="admin"
-if ! grep -qE "^PMA_BASIC_AUTH_USERS=" .env; then
-  PMA_BASIC_USER="${PMA_BASIC_USER_DEFAULT}"
-  PMA_BASIC_PASS="$(gen_secret_hex)"
-  # создаём bcrypt-хеш; экранируем $ для корректной подстановки в labels
-  PMA_BASIC_HASH="$(docker run --rm httpd:2.4-alpine htpasswd -nbB "${PMA_BASIC_USER}" "${PMA_BASIC_PASS}" | sed -e 's/\$/\$\$/g')"
-  printf "%s=%s\n" "PMA_BASIC_AUTH_USERS" "${PMA_BASIC_HASH}" >> .env
-  printf "%s=%s\n" "PMA_BASIC_AUTH_USER"  "${PMA_BASIC_USER}" >> .env
-  printf "%s=%s\n" "PMA_BASIC_AUTH_PASS"  "${PMA_BASIC_PASS}" >> .env
+# Если пользователь/пароль ещё не записаны в .env — сгенерируем и сохраним (без хеша)
+if ! grep -qE "^PMA_BASIC_AUTH_USER=" .env; then
+  put_env_if_absent "PMA_BASIC_AUTH_USER"  "${PMA_BASIC_USER_DEFAULT}"
+fi
+if ! grep -qE "^PMA_BASIC_AUTH_PASS=" .env; then
+  put_env_if_absent "PMA_BASIC_AUTH_PASS"  "$(gen_secret_hex)"
 fi
 
-# Обновим локальные переменные из .env в окружение скрипта для дальнейшего вывода
+# Поднимем переменные окружения из .env
 # shellcheck disable=SC2046
 set -a && source .env && set +a
 
-log "Файл .env подготовлен/обновлён."
+# Создадим/пересоздадим файл auth/.htpasswd (bcrypt, cost=10)
+docker run --rm -v "$PWD/auth:/work" httpd:2.4-alpine \
+  sh -lc "htpasswd -nbBC 10 '${PMA_BASIC_AUTH_USER}' '${PMA_BASIC_AUTH_PASS}' > /work/.htpasswd"
+
+# Дополнительно ограничим права файла
+chmod 600 auth/.htpasswd
+
+log "Файл auth/.htpasswd создан. Данные BasicAuth (логин/пароль) сохранены в .env."
 
 # ------------------------ docker-compose.yml ------------------------
 compose_needs_write=true
 if [[ -f docker-compose.yml ]]; then
-  read -r -p "Найден docker-compose.yml. Перезаписать его свежей версией? [y/N]: " ow
+  read -r -p "Найден docker-compose.yml. Перезаписать свежей версией? [y/N]: " ow
   if [[ ! "${ow:-N}" =~ ^[Yy]$ ]]; then
     compose_needs_write=false
     log "Оставляем существующий docker-compose.yml без изменений."
@@ -122,6 +132,7 @@ fi
 
 if [[ "${compose_needs_write}" == "true" ]]; then
   cat > docker-compose.yml <<'YAML'
+version: "3.9"
 
 name: wp-stack
 
@@ -212,10 +223,13 @@ services:
       - "traefik.http.routers.pma.tls=true"
       - "traefik.http.routers.pma.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
 
-      # Basic Auth через Traefik
-      - "traefik.http.middlewares.pma-auth.basicauth.users=${PMA_BASIC_AUTH_USERS}"
+      # Basic Auth через файл (устойчиво к '$')
+      - "traefik.http.middlewares.pma-auth.basicauth.usersfile=/auth/.htpasswd"
       - "traefik.http.routers.pma.middlewares=pma-auth@docker"
 
+    volumes:
+      - wp_data:/var/www/html
+      - ./auth:/auth:ro
     networks:
       - backend
       - proxy
@@ -242,7 +256,7 @@ log "Старт стека (docker compose up -d)..."
 docker compose up -d
 
 # ------------------------ Вывод итогов ------------------------
-# перечитываем .env на случай, если его правил пользователь
+# перечитаем .env для корректного вывода
 # shellcheck disable=SC2046
 set -a && source .env && set +a
 
@@ -257,17 +271,13 @@ echo "  DB_PASSWORD: ${DB_PASSWORD}"
 echo
 echo "phpMyAdmin:"
 echo "  URL: https://pma.${WP_DOMAIN}"
-if grep -qE "^PMA_BASIC_AUTH_USER=" .env && grep -qE "^PMA_BASIC_AUTH_PASS=" .env; then
-  echo "  BasicAuth Login: ${PMA_BASIC_AUTH_USER}"
-  echo "  BasicAuth Password: ${PMA_BASIC_AUTH_PASS}"
-else
-  echo "  BasicAuth: уже задан ранее (см. .env: PMA_BASIC_AUTH_USERS)"
-fi
+echo "  BasicAuth Login: ${PMA_BASIC_AUTH_USER}"
+echo "  BasicAuth Password: ${PMA_BASIC_AUTH_PASS}"
 echo "  DB_USER: ${DB_USER}"
 echo "  DB_PASSWORD: ${DB_PASSWORD}"
 echo "===================================================="
 echo
-echo "Примечание:"
+echo "Примечания:"
 echo " - Убедитесь, что DNS для ${WP_DOMAIN} и pma.${WP_DOMAIN} указывает на этот сервер."
-echo " - В Traefik должен быть настроен entrypoint 'websecure' и certresolver '${TRAEFIK_CERT_RESOLVER}'."
-echo " - Файл ./wp/.env содержит все секреты (права ограничены). Храните его в надёжном месте."
+echo " - В Traefik должен быть entrypoint 'websecure' и certresolver '${TRAEFIK_CERT_RESOLVER}'."
+echo " - Файл ./wp/.env содержит секреты; ./wp/auth/.htpasswd — файл хешей для BasicAuth (read-only в контейнере)."
