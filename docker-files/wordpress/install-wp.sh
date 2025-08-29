@@ -185,31 +185,26 @@ services:
         condition: service_healthy
     environment:
       - PMA_HOST=db
-      - PMA_USER=${DB_USER}
-      - PMA_PASSWORD=${DB_PASSWORD}
+      - PMA_ARBITRARY=0           # запрещает подключение к произвольным хостам
       - UPLOAD_LIMIT=64M
+      # (опц.) жёстко задаём абсолютный URL, полезно для прокси:
+      - PMA_ABSOLUTE_URI=https://pma.${WP_DOMAIN}/
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-
       - "traefik.http.routers.pma.rule=Host(`pma.${WP_DOMAIN}`)"
       - "traefik.http.routers.pma.entrypoints=websecure"
       - "traefik.http.routers.pma.tls=true"
       - "traefik.http.routers.pma.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+
+      # --- Basic Auth ---
+      - "traefik.http.middlewares.pma-auth.basicauth.users=${PMA_BASIC_AUTH_USERS}"
+      - "traefik.http.routers.pma.middlewares=pma-auth@docker"
+
     networks:
       - backend
       - proxy
 
-volumes:
-  db_data:
-  wp_data:
-
-networks:
-  backend:
-    name: wp-backend
-    internal: true
-  proxy:
-    external: true
 YAML
   log "Создан docker-compose.yml."
 fi
