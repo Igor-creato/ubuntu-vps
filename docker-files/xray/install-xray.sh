@@ -352,6 +352,7 @@ services:
     volumes:
       - ./xray/config.json:/etc/xray/config.json:ro
       - ./logs:/var/log/xray
+    command: ["run", "-c", "/etc/xray/config.json"]
     networks:
       - ${EXT_NET}
     # Порты наружу НЕ публикуем: доступ к 3128/1080 только из сети '${EXT_NET}'
@@ -364,8 +365,7 @@ services:
     security_opt:
       - no-new-privileges:true
     read_only: false               # нужен rw для /var/log/xray; не ставим true
-    cap_drop:
-      - ALL
+    cap_drop: ["ALL"]
     logging:
       driver: json-file
       options:
