@@ -288,7 +288,7 @@ if [[ -n "$REALITY_SHORT_ID" ]]; then
   SHORTID_JSON=$',\n          "shortId": "'"$REALITY_SHORT_ID"'"'
 fi
 
-cat > "${XRAY_DIR}/xray/config.json" <<JSON
+cat > "${XRAY_DIR}/config.json" <<JSON
 {
   "log": {
     "access": "/var/log/xray/access.log",
