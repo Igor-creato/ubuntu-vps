@@ -357,7 +357,7 @@ services:
       - ${EXT_NET}
     # Порты наружу НЕ публикуем: доступ к 3128/1080 только из сети '${EXT_NET}'
     healthcheck:
-      test: ["CMD-SHELL", "/usr/bin/xray -test -config /etc/xray/config.json >/dev/null 2>&1 && /usr/bin/xray -version"]
+      test: ["CMD", "/usr/local/bin/xray", "-test", "-config", "/etc/xray/config.json"]
       interval: 30s
       timeout: 5s
       retries: 5
