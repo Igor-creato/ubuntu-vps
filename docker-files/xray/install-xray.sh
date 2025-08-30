@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # install-xray.sh — VLESS TCP + Reality в Docker Compose (~/xray)
-# Вставьте VLESS URL типа:
+# Вставьте VLESS URL вида:
 # vless://UUID@HOST:PORT?type=tcp&security=reality&pbk=...&fp=...&sni=...&sid=...&spx=%2F&flow=xtls-rprx-vision
 
-set -Eeuo pipefail
+set -eE -o pipefail
 set -o errtrace
 trap 'echo -e "[\e[31mERROR\e[0m] $(date +%F\ %T) На строке $LINENO произошла ошибка. См. вывод выше." >&2' ERR
 
@@ -21,7 +21,7 @@ SERVER_PORT="${SERVER_PORT:-}"
 VLESS_UUID="${VLESS_UUID:-}"
 SNI="${SNI:-}"
 REALITY_PBK="${REALITY_PBK:-}"
-REALITY_SHORT_ID="${REALITY_SHORT_ID:-}"   # опц.
+REALITY_SHORT_ID="${REALITY_SHORT_ID:-}"   # опционально
 FINGERPRINT="${FINGERPRINT:-chrome}"
 SPIDERX="${SPIDERX:-/}"
 FLOW="${FLOW:-xtls-rprx-vision}"
@@ -43,17 +43,15 @@ parse_vless_url() {
   local rest="${url#vless://}"               # UUID@host:port?query#tag
   local uuid="${rest%%@*}"                   # до @
   local after_at="${rest#*@}"
-
   [[ "$after_at" == "$rest" ]] && err "Некорректная ссылка: отсутствует '@'"
 
   local hostport="${after_at%%\?*}"          # до ?
   local host="${hostport%%:*}"
   local port="${hostport##*:}"
 
-  local query="${after_at#*\?}"
-  query="${query%%#*}"                       # до #
+  local query="${after_at#*\?}"; query="${query%%#*}"
 
-  # распарсим query в обычный цикл (без ассоц. массивов)
+  # разбираем query без ассоц. массивов
   local type="" security="" pbk="" fp="" sni="" sid="" spx="" flow=""
   if [[ -n "$query" ]]; then
     IFS='&' read -r -a _pairs <<< "$query"
@@ -79,21 +77,21 @@ parse_vless_url() {
   VLESS_UUID="$uuid"
   SERVER_HOST="$host"
   SERVER_PORT="$port"
-  [[ -n "${fp}" ]] && FINGERPRINT="$fp"
-  [[ -n "${sni}" ]] && SNI="$sni"
-  [[ -n "${pbk}" ]] && REALITY_PBK="$pbk"
-  [[ -n "${sid}" ]] && REALITY_SHORT_ID="$sid"
-  [[ -n "${spx}" ]] && SPIDERX="$spx"
-  [[ -n "${flow}" ]] && FLOW="$flow"
+  [[ -n "$fp" ]]  && FINGERPRINT="$fp"
+  [[ -n "$sni" ]] && SNI="$sni"
+  [[ -n "$pbk" ]] && REALITY_PBK="$pbk"
+  [[ -n "$sid" ]] && REALITY_SHORT_ID="$sid"
+  [[ -n "$spx" ]] && SPIDERX="$spx"
+  [[ -n "$flow" ]]&& FLOW="$flow"
 
   # sanity
-  validate_uuid "$VLESS_UUID"      || err "UUID неверного формата: $VLESS_UUID"
+  validate_uuid "$VLESS_UUID"          || err "UUID неверного формата: $VLESS_UUID"
   validate_host_no_port "$SERVER_HOST" || err "HOST должен быть без порта/скобок: $SERVER_HOST"
-  validate_port "$SERVER_PORT"     || err "PORT некорректен: $SERVER_PORT"
-  [[ -n "$SNI" ]]                  || err "В ссылке не указан sni="
-  [[ -n "$REALITY_PBK" ]]          || err "В ссылке не указан pbk="
+  validate_port "$SERVER_PORT"         || err "PORT некорректен: $SERVER_PORT"
+  [[ -n "$SNI" ]]                      || err "В ссылке не указан sni="
+  [[ -n "$REALITY_PBK" ]]              || err "В ссылке не указан pbk="
 
-  # предупреждения (инфо)
+  # предупреждения
   [[ "${type:-tcp}" == "tcp" ]] || log "WARN: type=${type:-<пусто>} (скрипт рассчитан на TCP)"
   [[ "${security:-reality}" == "reality" ]] || log "WARN: security=${security:-<пусто>} (скрипт рассчитан на Reality)"
 }
@@ -117,9 +115,6 @@ else
     read -rp "SERVER_PORT: " SERVER_PORT
     until validate_port "$SERVER_PORT"; do read -rp "   SERVER_PORT: " SERVER_PORT; done
   fi
-  if [[ -z "$VLESS_UUID" ]]; then  # защита от случайной кириллицы
-    VLESS_UUID=""
-  fi
   if [[ -z "$VLESS_UUID" ]]; then
     read -rp "VLESS UUID: " VLESS_UUID
     until validate_uuid "$VLESS_UUID"; do read -rp "   UUID: " VLESS_UUID; done
@@ -138,12 +133,16 @@ else
   read -rp "flow [${FLOW}]: " _flow || true; FLOW="${_flow:-$FLOW}"
 fi
 
+# Кратко покажем, что распарсили (для отладки)
+log "Параметры: host=${SERVER_HOST} port=${SERVER_PORT} uuid=${VLESS_UUID}"
+log "Reality: sni=${SNI} pbk=${REALITY_PBK} sid=${REALITY_SHORT_ID:-<пусто>} fp=${FINGERPRINT} spx=${SPIDERX} flow=${FLOW:-<пусто>}"
+
 # ====== каталоги и env ======
 log "Каталоги: ${XRAY_DIR}/xray и ${XRAY_DIR}/logs"
 mkdir -p "${XRAY_DIR}/xray" "${XRAY_DIR}/logs"
 
 backup_if_exists "${XRAY_DIR}/env.example"
-cat > "${XRAY_DIR}/env.example" <<ENV
+cat > "${XRAY_DIR}/env.example" <<EOF
 XRAY_DIR=${XRAY_DIR}
 EXT_NET=${EXT_NET}
 SERVICE_NAME=${SERVICE_NAME}
@@ -161,15 +160,15 @@ REALITY_SHORT_ID=${REALITY_SHORT_ID}
 FINGERPRINT=${FINGERPRINT}
 SPIDERX=${SPIDERX}
 FLOW=${FLOW}
-ENV
+EOF
 log "Создан: ${XRAY_DIR}/env.example"
 
 # ====== config.json ======
 backup_if_exists "${XRAY_DIR}/xray/config.json"
 USER_JSON="\"id\": \"${VLESS_UUID}\", \"encryption\": \"none\""
-[[ -n "$FLOW" ]] && USER_JSON="${USER_JSON}, \"flow\": \"${FLOW}\""
+[[ -n "${FLOW}" ]] && USER_JSON="${USER_JSON}, \"flow\": \"${FLOW}\""
 SHORTID_JSON=""
-[[ -n "$REALITY_SHORT_ID" ]] && SHORTID_JSON=$',\n          "shortId": "'"$REALITY_SHORT_ID"'"'
+[[ -n "${REALITY_SHORT_ID}" ]] && SHORTID_JSON=$',\n          "shortId": "'"$REALITY_SHORT_ID"'"'
 
 cat > "${XRAY_DIR}/xray/config.json" <<JSON
 {
