@@ -42,12 +42,13 @@ services:
       retries: 5
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n:latest
+    image: docker.n8n.io/n8nio/n8n:1.108.2
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
+      # --- База
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_PORT: 5432
@@ -55,27 +56,68 @@ services:
       DB_POSTGRESDB_USER: n8n_user
       DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_POSTGRESDB_SCHEMA: public
+
+      # --- URL/прокси за Traefik
       N8N_HOST: ${N8N_HOST}
       N8N_PORT: 5678
       N8N_PROTOCOL: https
-      WEBHOOK_URL: https://${N8N_HOST}/
-      NODE_ENV: production
-      GENERIC_TIMEZONE: Europe/Moscow
-      TZ: Europe/Moscow
+      N8N_EDITOR_BASE_URL: https://${N8N_HOST}
+      WEBHOOK_URL: https://${N8N_HOST}
+      N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-1}
+
+      GENERIC_TIMEZONE: Europe/Amsterdam
+      TZ: Europe/Amsterdam
+
+      # --- Безопасность/флаги
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       N8N_BASIC_AUTH_USER: admin
       N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
+      N8N_COOKIE_SAMESITE: ${N8N_COOKIE_SAMESITE:-lax}
+
       N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
       N8N_PUBLIC_API_DISABLED: "true"
+      N8N_COMMUNITY_PACKAGES_ENABLED: "false"
+      N8N_VERIFIED_PACKAGES_ENABLED: "false"
+      N8N_UNVERIFIED_PACKAGES_ENABLED: "false"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+
+      # --- Раннеры (убираем депрекейт)
+      N8N_RUNNERS_ENABLED: "true"
+
+      # --- Прокси для исходящего трафика из контейнера n8n
+      # ВАЖНО: не использовать ALL_PROXY; NO_PROXY держать максимально узким,
+      # иначе возможны петли/игнорирование прокси.
+      HTTP_PROXY:  http://xray-client:3128
+      HTTPS_PROXY: http://xray-client:3128
+      http_proxy:  http://xray-client:3128
+      https_proxy: http://xray-client:3128
+      NO_PROXY:    localhost,127.0.0.1,::1
+      no_proxy:    localhost,127.0.0.1,::1
+
     volumes:
       - n8n_data:/home/node/.n8n
+
+    healthcheck:
+      # без curl: используем встроенный node для GET /healthz
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:5678/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
+      # router
+      - "traefik.http.routers.n8n.rule=Host(`n8n.${N8N_HOST}`)"
       - "traefik.http.routers.n8n.entrypoints=websecure"
+      - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
+      # service
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+      # используем внешнюю сеть proxy, где живёт Traefik
       - "traefik.docker.network=proxy"
+
     networks:
       - n8n_internal
       - proxy
@@ -112,6 +154,32 @@ echo "📝 Создаем .env файл"
 cat > .env << EOF
 # Доменное имя для n8n
 N8N_HOST="n8n.${N8N_HOST}"
+# ====== Базовые настройки n8n ======
+N8N_PROTOCOL=https
+N8N_PORT=5678
+N8N_EDITOR_BASE_URL=https://n8n.autmatization-bot.ru
+WEBHOOK_URL=https://n8n.autmatization-bot.ru
+
+# HTTPS → true, чтобы cookie были secure
+N8N_SECURE_COOKIE=true
+N8N_COOKIE_SAMESITE=lax
+
+# ====== Рекомендации и оптимизации ======
+N8N_RUNNERS_ENABLED=true
+N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+
+# Отключим community/verified/unverified packages,
+# чтобы дашборд не висел на таймаутах
+N8N_COMMUNITY_PACKAGES_ENABLED=false
+N8N_VERIFIED_PACKAGES_ENABLED=false
+N8N_UNVERIFIED_PACKAGES_ENABLED=false
+
+# Отключаем лишнюю телеметрию
+N8N_DIAGNOSTICS_ENABLED=false
+N8N_PERSONALIZATION_ENABLED=false
+
+# Если n8n стоит за одним обратным прокси (Traefik)
+N8N_PROXY_HOPS=1
 
 # Секретные переменные
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
