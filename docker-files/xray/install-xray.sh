@@ -168,7 +168,7 @@ backup_if_exists "${XRAY_DIR}/xray/config.json"
 USER_JSON="\"id\": \"${VLESS_UUID}\", \"encryption\": \"none\""
 [[ -n "${FLOW}" ]] && USER_JSON="${USER_JSON}, \"flow\": \"${FLOW}\""
 SHORTID_JSON=""
-[[ -n "${REALITY_SHORT_ID}" ]] && SHORTID_JSON=$',\n          "shortId": "'"$REALITY_SHORT_ID"'"'
+[[ -n "${REALITY_SHORT_ID}" ]] && SHORTID_JSON=$',\n          "shortId": '"'"$REALITY_SHORT_ID"'"''
 
 cat > "${XRAY_DIR}/xray/config.json" <<JSON
 {
