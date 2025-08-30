@@ -14,6 +14,21 @@ cd "$N8N_DIR"
 VPN_NET="${VPN_NET:-vpn}"
 # <<< NEW
 
+# === VPN: выбор режима (один раз) ===
+VPN_NET="${VPN_NET:-vpn}"   # имя внешней сети для VPN
+USE_VPN="${USE_VPN:-}"      # можно задать заранее USE_VPN=1/0, тогда вопрос не задастся
+
+if [[ -z "${USE_VPN}" ]]; then
+  read -r -p "[?] Устанавливать n8n с VPN (через xray-client) [y/N]: " _ans || true
+  case "${_ans,,}" in
+    y|yes) USE_VPN=1 ;;
+    *)     USE_VPN=0 ;;
+  esac
+fi
+
+COMPOSE_ARGS="-f docker-compose.yml"
+# === /VPN ===
+
 
 
 # Останавливаем и удаляем старые контейнеры
@@ -90,16 +105,6 @@ services:
       # --- Раннеры (убираем депрекейт)
       N8N_RUNNERS_ENABLED: "true"
 
-      # --- Прокси для исходящего трафика из контейнера n8n
-      # ВАЖНО: не использовать ALL_PROXY; NO_PROXY держать максимально узким,
-      # иначе возможны петли/игнорирование прокси.
-      HTTP_PROXY:  http://xray-client:3128
-      HTTPS_PROXY: http://xray-client:3128
-      http_proxy:  http://xray-client:3128
-      https_proxy: http://xray-client:3128
-      NO_PROXY:    localhost,127.0.0.1,::1
-      no_proxy:    localhost,127.0.0.1,::1
-
     volumes:
       - n8n_data:/home/node/.n8n
 
@@ -125,7 +130,6 @@ services:
     networks:
       - n8n_internal
       - proxy
-      - vpn
 
 networks:
   n8n_internal:
@@ -133,10 +137,6 @@ networks:
   proxy:
     external: true
     name: proxy
-  vpn:                 
-    external: true
-    name: vpn
-
 
 volumes:
   postgres_data:
@@ -146,6 +146,42 @@ volumes:
 EOF
 
 echo "✅ docker-compose.yml создан"
+
+# Установка с vpn
+if [[ "${USE_VPN}" -eq 1 ]]; then
+  # сеть vpn (внешняя)
+  if ! docker network inspect "${VPN_NET}" >/dev/null 2>&1; then
+    echo "[INFO]  $(date +'%F %T')  Сеть '${VPN_NET}' не найдена — создаю..."
+    docker network create "${VPN_NET}"
+  else
+    echo "[INFO]  $(date +'%F %T')  Сеть '${VPN_NET}' уже существует."
+  fi
+
+  # docker-compose.vpn.yml: добавляем сеть vpn и прокси-переменные только здесь
+  cat > docker-compose.vpn.yml <<'YAML'
+services:
+  n8n:
+    networks:
+      - vpn
+    environment:
+      HTTP_PROXY:  http://xray-client:3128
+      HTTPS_PROXY: http://xray-client:3128
+      NO_PROXY: >-
+        localhost,127.0.0.1,::1,
+        n8n,n8n-n8n-1,
+        postgres,n8n-postgres-1,
+        traefik,traefik-traefik-1,
+        *.local,*.lan
+
+networks:
+  vpn:
+    external: true
+YAML
+
+  COMPOSE_ARGS="-f docker-compose.yml -f docker-compose.vpn.yml"
+  echo "✅ docker-compose.vpn.yml создан"
+fi
+# Установка с vpn
 
 # Генерируем безопасные пароли и секреты
 echo "🔐 Генерируем безопасные пароли и секреты"
@@ -244,7 +280,8 @@ fi
 
 # Запускаем docker-compose
 echo "🐳 Запускаем n8n с помощью Docker Compose"
-docker compose up -d
+docker compose ${COMPOSE_ARGS} up -d
+
 
 echo "⏳ Ожидаем запуск контейнеров (10 секунд)..."
 sleep 10
