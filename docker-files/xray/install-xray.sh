@@ -380,7 +380,6 @@ log "Создан: ${XRAY_DIR}/xray/config.json"
 ########################################
 backup_if_exists "${XRAY_DIR}/docker-compose.yml"
 cat > "${XRAY_DIR}/docker-compose.yml" <<YAML
-version: "3.9"
 services:
   ${SERVICE_NAME}:
     image: ${XRAY_IMAGE}
