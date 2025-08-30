@@ -80,8 +80,8 @@ services:
       N8N_HOST: ${N8N_HOST}
       N8N_PORT: 5678
       N8N_PROTOCOL: https
-      N8N_EDITOR_BASE_URL: https://n8n.${N8N_HOST}
-      WEBHOOK_URL: https://n8n.${N8N_HOST}
+      N8N_EDITOR_BASE_URL: https://${N8N_HOST}
+      WEBHOOK_URL: https://${N8N_HOST}
       N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-1}
 
       GENERIC_TIMEZONE: Europe/Amsterdam
@@ -118,7 +118,7 @@ services:
     labels:
       - "traefik.enable=true"
       # router
-      - "traefik.http.routers.n8n.rule=Host(`n8n.${N8N_HOST}`)"
+      - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
       - "traefik.http.routers.n8n.entrypoints=websecure"
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
@@ -255,7 +255,7 @@ echo ""
 echo "================================================"
 echo "🔐 ОДНОРАЗОВЫЕ УЧЕТНЫЕ ДАННЫЕ ДЛЯ N8N"
 echo "================================================"
-echo "🌐 Домен: https://n8n.$N8N_HOST"
+echo "🌐 Домен: https://$N8N_HOST"
 echo "👤 Имя пользователя: admin"
 echo "🔑 Пароль: $N8N_BASIC_AUTH_PASSWORD"
 echo "🗄️ Пароль PostgreSQL: $POSTGRES_PASSWORD"
@@ -296,7 +296,7 @@ docker compose logs n8n --tail=20
 
 echo ""
 echo "✅ Развертывание завершено!"
-echo "🌐 n8n должен быть доступен по: https://n8n.$N8N_HOST"
+echo "🌐 n8n должен быть доступен по: https://$N8N_HOST"
 echo "⏳ Если это первый запуск, подождите несколько минут пока Traefik получит SSL сертификаты"
 
 echo ""
