@@ -364,7 +364,6 @@ services:
     # Немного безопасности и чистоты логов Docker
     security_opt:
       - no-new-privileges:true
-    read_only: false               # нужен rw для /var/log/xray; не ставим true
     cap_drop: ["ALL"]
     logging:
       driver: json-file
