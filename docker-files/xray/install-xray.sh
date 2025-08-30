@@ -350,7 +350,7 @@ services:
     environment:
       - TZ=Europe/Amsterdam
     volumes:
-      - ./xray/config.json:/etc/xray/config.json:ro
+      - ./config.json:/etc/xray/config.json:ro
       - ./logs:/var/log/xray
     command: ["run", "-c", "/etc/xray/config.json"]
     networks:
