@@ -1,90 +1,86 @@
 #!/usr/bin/env bash
 # install-xray.sh
-# Автоматически разворачивает Xray (VLESS-клиент) в Docker Compose в ~/xray и СОЗДАЁТ все нужные файлы:
-#   - ./xray/config.json         (конфиг Xray)
-#   - ./docker-compose.yml       (стек Docker)
-#   - ./env.example              (шаблон переменных)
+# Автоматически разворачивает Xray (VLESS-клиент) в Docker Compose в ~/xray
+# и СОЗДАЁТ все нужные файлы:
+#   - ./xray/config.json
+#   - ./docker-compose.yml
+#   - ./env.example
+#
+# Режимы:
+#   - Интерактивный: просто запусти без аргументов — скрипт задаст вопросы.
+#   - Неинтерактивный: передай флаги (--server-host, --uuid, и т.д.) или экспортируй переменные.
 #
 # Особенности:
-# - Поднимает HTTP-прокси (3128) и SOCKS5 (1080), доступные ТОЛЬКО внутри внешней docker-сети 'proxy' (ports: не публикуются).
-# - Жёсткая маршрутизация: весь трафик с http-in/socks-in идёт в vless-out. НЕТ fallback на direct/freedom → исключён обход VPN.
-# - Поддерживает транспорты tcp|ws и защиты tls|reality|none.
-# - Идемпотентен: перезапись файлов с бэкапом, подробные логи, проверки окружения.
+#   - HTTP-прокси (3128) и SOCKS5 (1080) доступны ТОЛЬКО внутри внешней docker-сети 'proxy' (ports: не публикуем).
+#   - Жёсткая маршрутизация: любой трафик с http-in/socks-in → только vless-out (без freedom/direct).
+#   - Поддержка транспортов tcp|ws и защит tls|reality|none.
+#   - Подробные логи, валидация, бэкапы при перезаписи.
 #
 # Документация:
 #   Docker:   https://docs.docker.com/
 #   Compose:  https://docs.docker.com/compose/
 #   Xray:     https://xtls.github.io/
-#
-# Требования: docker, "docker compose" (plugin), существующая внешняя сеть Docker 'proxy'
-# Рекомендация: запускать от пользователя с правами docker.
 
 set -Eeuo pipefail
 
 ########################################
-# Глобальные настройки по умолчанию
+# Значения по умолчанию
 ########################################
-XRAY_DIR="${HOME}/xray"           # каталог проекта
-EXT_NET="proxy"                   # внешняя сеть Docker
-SERVICE_NAME="xray-client"
-XRAY_IMAGE="teddysun/xray:1.8.23" # фиксируем версию для воспроизводимости
-HTTP_PORT=3128
-SOCKS_PORT=1080
+XRAY_DIR="${XRAY_DIR:-$HOME/xray}"    # каталог проекта
+EXT_NET="${EXT_NET:-proxy}"           # внешняя сеть Docker
+SERVICE_NAME="${SERVICE_NAME:-xray-client}"
+XRAY_IMAGE="${XRAY_IMAGE:-teddysun/xray:1.8.23}"
+HTTP_PORT="${HTTP_PORT:-3128}"
+SOCKS_PORT="${SOCKS_PORT:-1080}"
 
-# Параметры подключения к серверу (можно указать флагами или через переменные окружения)
+# Параметры (могут прийти аргументами/переменными; если пусто — спросим интерактивно)
 SERVER_HOST="${SERVER_HOST:-}"
 SERVER_PORT="${SERVER_PORT:-443}"
 VLESS_UUID="${VLESS_UUID:-}"
-TRANSPORT="${TRANSPORT:-tcp}"     # tcp|ws
-SECURITY="${SECURITY:-tls}"       # tls|reality|none
-WS_PATH="${WS_PATH:-/vless}"      # для ws
-SNI="${SNI:-}"                    # serverName для tls/reality; по умолчанию = SERVER_HOST
-ALPN="${ALPN:-http/1.1}"          # http/1.1|h2 — под сервер
-REALITY_PUBLIC_KEY="${REALITY_PUBLIC_KEY:-}" # для reality
-REALITY_SHORT_ID="${REALITY_SHORT_ID:-}"     # для reality
+TRANSPORT="${TRANSPORT:-tcp}"         # tcp|ws
+SECURITY="${SECURITY:-tls}"           # tls|reality|none
+WS_PATH="${WS_PATH:-/vless}"          # если transport=ws
+SNI="${SNI:-}"                        # SNI/ServerName для tls|reality (по умолчанию = SERVER_HOST)
+ALPN="${ALPN:-http/1.1}"              # http/1.1|h2
+REALITY_PUBLIC_KEY="${REALITY_PUBLIC_KEY:-}"
+REALITY_SHORT_ID="${REALITY_SHORT_ID:-}"
 
 ########################################
-# Вспомогательные функции
+# Утилиты логирования
 ########################################
+log()  { echo -e "[\e[34mINFO\e[0m]  $(date +'%F %T')  $*"; }
+warn() { echo -e "[\e[33mWARN\e[0m]  $(date +'%F %T')  $*" >&2; }
+err()  { echo -e "[\e[31mERROR\e[0m] $(date +'%F %T')  $*" >&2; exit 1; }
 
-# log: печатает информационное сообщение с меткой времени.
-log() { echo -e "[\e[34mINFO\e[0m] $(date +'%F %T')  $*"; }
-
-# warn: печатает предупреждение.
-warn() { echo -e "[\e[33mWARN\e[0m] $(date +'%F %T')  $*" >&2; }
-
-# err: печатает ошибку и выходит.
-err() { echo -e "[\e[31mERROR\e[0m] $(date +'%F %T') $*" >&2; exit 1; }
-
-# usage: показывает справку по скрипту.
 usage() {
   cat <<'USAGE'
-Установка Xray-клиента в Docker Compose и автогенерация файлов.
+Использование:
+  Интерактивно (рекомендуется):
+    ./install-xray.sh
 
-Флаги (можно также задать одноимёнными переменными окружения):
+  Неинтерактивно (все параметры флагами):
+    ./install-xray.sh --server-host my.server.com --server-port 443 \
+      --uuid 123e4567-e89b-12d3-a456-426614174000 \
+      --transport ws --security tls --ws-path /ws --sni my.server.com --alpn http/1.1
+
+Поддерживаемые флаги (можно также задать одноимёнными переменными окружения):
   --dir PATH              Каталог проекта (по умолчанию: ~/xray)
   --net NAME              Имя внешней docker-сети (по умолчанию: proxy)
   --image NAME:TAG        Образ Xray (по умолчанию: teddysun/xray:1.8.23)
 
-  --server-host HOST      Домен/IP VLESS-сервера (обязательно)
+  --server-host HOST      Домен/IP VLESS-сервера
   --server-port N         Порт сервера (по умолчанию: 443)
-  --uuid UUID             UUID пользователя VLESS (обязательно, формат xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+  --uuid UUID             UUID пользователя VLESS
   --transport tcp|ws      Транспорт (по умолчанию: tcp)
   --security tls|reality|none  Защита (по умолчанию: tls)
-  --ws-path PATH          Путь для WebSocket (по умолчанию: /vless, при transport=ws)
-  --sni NAME              SNI/ServerName для tls/reality (по умолчанию = server-host)
+  --ws-path PATH          Путь для WebSocket (по умолчанию: /vless)
+  --sni NAME              SNI/ServerName (по умолчанию = server-host)
   --alpn STR              ALPN (по умолчанию: http/1.1; например h2)
-  --reality-pubkey KEY    Reality public key (обязательно при --security reality)
-  --reality-shortid ID    Reality shortId (желательно при --security reality)
-
-Примеры:
-  ./install-xray.sh --server-host my.server.com --uuid 123e4567-e89b-12d3-a456-426614174000
-  ./install-xray.sh --server-host my.server.com --uuid <UUID> --transport ws --security tls --ws-path /ws
-  ./install-xray.sh --server-host my.server.com --uuid <UUID> --security reality --reality-pubkey XYZ --reality-shortid abc123
+  --reality-pubkey KEY    Reality public key (обязательно при security=reality)
+  --reality-shortid ID    Reality shortId (желательно при security=reality)
 USAGE
 }
 
-# backup_if_exists: делает .bak, если файл существует и отличается.
 backup_if_exists() {
   local f="$1"
   if [[ -f "$f" ]]; then
@@ -93,12 +89,10 @@ backup_if_exists() {
   fi
 }
 
-# ensure_cmd: проверка наличия команды.
 ensure_cmd() {
-  command -v "$1" >/dev/null 2>&1 || err "Не найдена команда '$1'. Установка: см. официальную документацию."
+  command -v "$1" >/dev/null 2>&1 || err "Команда '$1' не найдена. Установка: см. официальную документацию."
 }
 
-# validate_uuid: проверяет формат UUID.
 validate_uuid() {
   local u="$1"
   [[ "$u" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
@@ -128,57 +122,106 @@ while [[ $# -gt 0 ]]; do
 done
 
 ########################################
-# Проверки окружения и входных параметров
+# Проверки окружения
 ########################################
 ensure_cmd docker
 docker compose version >/dev/null 2>&1 || err "'docker compose' недоступен. См.: https://docs.docker.com/compose/install/"
+docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена. Создайте:  docker network create $EXT_NET"
 
-docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена. Создайте её:  docker network create $EXT_NET"
-
-[[ -n "$SERVER_HOST" ]] || err "Не указан --server-host"
-[[ -n "$VLESS_UUID" ]] || err "Не указан --uuid"
-validate_uuid "$VLESS_UUID" || err "Неверный формат UUID: $VLESS_UUID"
-
-[[ "$TRANSPORT" == "tcp" || "$TRANSPORT" == "ws" ]] || err "--transport должен быть tcp|ws"
-[[ "$SECURITY" == "tls" || "$SECURITY" == "reality" || "$SECURITY" == "none" ]] || err "--security должен быть tls|reality|none"
-
-if [[ "$SECURITY" == "reality" ]]; then
-  [[ -n "$REALITY_PUBLIC_KEY" ]] || err "--reality-pubkey обязателен при --security reality"
-  [[ -n "$REALITY_SHORT_ID" ]] || warn "Reality shortId не задан (--reality-shortid). Это не всегда критично, но рекомендуется."
+########################################
+# Интерактивные запросы, если что-то не задано
+########################################
+if [[ -z "${SERVER_HOST}" ]]; then
+  read -rp "Домен/IP VLESS-сервера: " SERVER_HOST
+  while [[ -z "$SERVER_HOST" ]]; do read -rp "Пусто. Введи домен/IP: " SERVER_HOST; done
 fi
 
-[[ -n "$SNI" ]] || SNI="$SERVER_HOST"
+if [[ -z "${SERVER_PORT}" ]]; then
+  read -rp "Порт VLESS [443]: " _p || true; SERVER_PORT="${_p:-443}"
+fi
+
+if [[ -z "${VLESS_UUID}" ]]; then
+  read -rp "UUID пользователя VLESS (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): " VLESS_UUID
+  until validate_uuid "$VLESS_UUID"; do
+    echo "Неверный формат UUID. Пример: 123e4567-e89b-12d3-a456-426614174000"
+    read -rp "UUID: " VLESS_UUID
+  done
+else
+  validate_uuid "$VLESS_UUID" || err "Неверный формат UUID: $VLESS_UUID"
+fi
+
+case "${TRANSPORT}" in
+  tcp|ws) ;; *)
+    read -rp "Транспорт (tcp|ws) [tcp]: " _t || true; TRANSPORT="${_t:-tcp}"
+    while [[ "$TRANSPORT" != "tcp" && "$TRANSPORT" != "ws" ]]; do
+      read -rp "Допустимо 'tcp' или 'ws': " TRANSPORT
+    done
+  ;;
+esac
+
+case "${SECURITY}" in
+  tls|reality|none) ;; *)
+    read -rp "Защита (tls|reality|none) [tls]: " _s || true; SECURITY="${_s:-tls}"
+    while [[ "$SECURITY" != "tls" && "$SECURITY" != "reality" && "$SECURITY" != "none" ]]; do
+      read -rp "Допустимо 'tls'|'reality'|'none': " SECURITY
+    done
+  ;;
+esac
+
+if [[ "$TRANSPORT" == "ws" ]]; then
+  if [[ -z "$WS_PATH" ]]; then
+    read -rp "WS path [/vless]: " _w || true; WS_PATH="${_w:-/vless}"
+  fi
+fi
+
+if [[ -z "$SNI" ]]; then
+  read -rp "SNI/ServerName [${SERVER_HOST}]: " _sni || true; SNI="${_sni:-$SERVER_HOST}"
+fi
+
+if [[ -z "$ALPN" ]]; then
+  read -rp "ALPN [http/1.1]: " _alpn || true; ALPN="${_alpn:-http/1.1}"
+fi
+
+if [[ "$SECURITY" == "reality" ]]; then
+  if [[ -z "$REALITY_PUBLIC_KEY" ]]; then
+    read -rp "Reality publicKey: " REALITY_PUBLIC_KEY
+    [[ -n "$REALITY_PUBLIC_KEY" ]] || err "publicKey обязателен для reality"
+  fi
+  if [[ -z "$REALITY_SHORT_ID" ]]; then
+    read -rp "Reality shortId (можно пусто): " REALITY_SHORT_ID || true
+  fi
+fi
 
 ########################################
-# Подготовка каталогов и файлов
+# Подготовка каталогов
 ########################################
-log "Подготовка каталогов в: $XRAY_DIR"
-mkdir -p "$XRAY_DIR/xray" "$XRAY_DIR/logs"
+log "Готовлю каталоги: ${XRAY_DIR}/xray и ${XRAY_DIR}/logs"
+mkdir -p "${XRAY_DIR}/xray" "${XRAY_DIR}/logs"
 
-# env.example: создаём для наглядности и повторного использования
-backup_if_exists "$XRAY_DIR/env.example"
-cat > "$XRAY_DIR/env.example" <<ENV
+########################################
+# Генерация env.example
+########################################
+backup_if_exists "${XRAY_DIR}/env.example"
+cat > "${XRAY_DIR}/env.example" <<ENV
 # Пример переменных для Xray-клиента
-SERVER_HOST=$SERVER_HOST
-SERVER_PORT=$SERVER_PORT
-VLESS_UUID=$VLESS_UUID
-TRANSPORT=$TRANSPORT
-SECURITY=$SECURITY
-WS_PATH=$WS_PATH
-SNI=$SNI
-ALPN=$ALPN
-REALITY_PUBLIC_KEY=$REALITY_PUBLIC_KEY
-REALITY_SHORT_ID=$REALITY_SHORT_ID
+SERVER_HOST=${SERVER_HOST}
+SERVER_PORT=${SERVER_PORT}
+VLESS_UUID=${VLESS_UUID}
+TRANSPORT=${TRANSPORT}
+SECURITY=${SECURITY}
+WS_PATH=${WS_PATH}
+SNI=${SNI}
+ALPN=${ALPN}
+REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
+REALITY_SHORT_ID=${REALITY_SHORT_ID}
 ENV
-
-log "Создан файл: $XRAY_DIR/env.example"
+log "Создан: ${XRAY_DIR}/env.example"
 
 ########################################
-# Формирование streamSettings
+# Формируем streamSettings
 ########################################
 STREAM_SETTINGS=""
 if [[ "$SECURITY" == "reality" ]]; then
-  # Reality поверх TCP
   STREAM_SETTINGS=$(cat <<JSON
 "network": "tcp",
 "security": "reality",
@@ -192,7 +235,6 @@ if [[ "$SECURITY" == "reality" ]]; then
 JSON
 )
 elif [[ "$TRANSPORT" == "ws" ]]; then
-  # WebSocket + (tls|none)
   if [[ "$SECURITY" == "tls" ]]; then
     STREAM_SETTINGS=$(cat <<JSON
 "network": "ws",
@@ -202,23 +244,18 @@ elif [[ "$TRANSPORT" == "ws" ]]; then
   "alpn": ["$ALPN"],
   "allowInsecure": false
 },
-"wsSettings": {
-  "path": "$WS_PATH"
-}
+"wsSettings": { "path": "$WS_PATH" }
 JSON
 )
   else
     STREAM_SETTINGS=$(cat <<JSON
 "network": "ws",
 "security": "none",
-"wsSettings": {
-  "path": "$WS_PATH"
-}
+"wsSettings": { "path": "$WS_PATH" }
 JSON
 )
   fi
 else
-  # TCP + (tls|none)
   if [[ "$SECURITY" == "tls" ]]; then
     STREAM_SETTINGS=$(cat <<JSON
 "network": "tcp",
@@ -240,10 +277,10 @@ JSON
 fi
 
 ########################################
-# Генерация xray/config.json
+# Генерация xray/config.json (жёстко: без direct/freedom)
 ########################################
-backup_if_exists "$XRAY_DIR/xray/config.json"
-cat > "$XRAY_DIR/xray/config.json" <<JSON
+backup_if_exists "${XRAY_DIR}/xray/config.json"
+cat > "${XRAY_DIR}/xray/config.json" <<JSON
 {
   "log": {
     "access": "/var/log/xray/access.log",
@@ -275,19 +312,19 @@ cat > "$XRAY_DIR/xray/config.json" <<JSON
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-      { "type": "field", "inboundTag": ["http-in", "socks-in"], "outboundTag": "vless-out" }
+      { "type": "field", "inboundTag": ["http-in","socks-in"], "outboundTag": "vless-out" }
     ]
   }
 }
 JSON
-
-log "Создан файл: $XRAY_DIR/xray/config.json"
+log "Создан: ${XRAY_DIR}/xray/config.json"
 
 ########################################
 # Генерация docker-compose.yml
 ########################################
-backup_if_exists "$XRAY_DIR/docker-compose.yml"
-cat > "$XRAY_DIR/docker-compose.yml" <<YAML
+backup_if_exists "${XRAY_DIR}/docker-compose.yml"
+cat > "${XRAY_DIR}/docker-compose.yml" <<YAML
+version: "3.9"
 services:
   ${SERVICE_NAME}:
     image: ${XRAY_IMAGE}
@@ -298,8 +335,7 @@ services:
       - ./logs:/var/log/xray
     networks:
       - ${EXT_NET}
-    # Ничего не публикуем наружу: доступ к 3128/1080 только из сети '${EXT_NET}'
-    # ports: []
+    # Порты наружу НЕ публикуются — доступ только из сети '${EXT_NET}'
     healthcheck:
       test: ["CMD", "/usr/bin/xray", "-version"]
       interval: 30s
@@ -310,21 +346,17 @@ networks:
   ${EXT_NET}:
     external: true
 YAML
-
-log "Создан файл: $XRAY_DIR/docker-compose.yml"
+log "Создан: ${XRAY_DIR}/docker-compose.yml"
 
 ########################################
-# Запуск стека
+# Запуск и мини-диагностика
 ########################################
-log "Запуск docker compose в: $XRAY_DIR"
-pushd "$XRAY_DIR" >/dev/null
+log "Запуск docker compose в: ${XRAY_DIR}"
+pushd "${XRAY_DIR}" >/dev/null
 docker compose pull
 docker compose up -d
 popd >/dev/null
 
-########################################
-# Быстрая диагностика
-########################################
 log "Проверка, что контейнер в сети '${EXT_NET}':"
 docker inspect "${SERVICE_NAME}" --format '{{json .NetworkSettings.Networks}}' || true
 
@@ -332,23 +364,16 @@ cat <<EOF
 
 Готово ✅
 
-Что дальше:
+Проверь работу прокси из этой же сети:
+  docker run --rm --network ${EXT_NET} curlimages/curl:8.11.1 \\
+    -sS -x http://${SERVICE_NAME}:3128 https://api.ipify.org; echo
 
-1) Прокси-доступ из контейнеров в сети '${EXT_NET}':
-   - HTTP-прокси:  http://${SERVICE_NAME}:3128
-   - SOCKS5:       socks5h://${SERVICE_NAME}:1080
-
-2) Быстрая проверка из той же сети:
-   docker run --rm --network ${EXT_NET} curlimages/curl:8.11.1 \\
-     -sS -x http://${SERVICE_NAME}:3128 https://api.ipify.org; echo
-
-3) Логи Xray:
-   docker compose -f ${XRAY_DIR}/docker-compose.yml logs --tail=100 ${SERVICE_NAME}
-   docker compose -f ${XRAY_DIR}/docker-compose.yml exec ${SERVICE_NAME} sh -lc 'tail -n 50 /var/log/xray/access.log; echo; tail -n 50 /var/log/xray/error.log'
+Логи Xray:
+  docker compose -f ${XRAY_DIR}/docker-compose.yml logs --tail=100 ${SERVICE_NAME}
+  docker compose -f ${XRAY_DIR}/docker-compose.yml exec ${SERVICE_NAME} sh -lc 'tail -n 50 /var/log/xray/access.log; echo; tail -n 50 /var/log/xray/error.log'
 
 Подсказки:
-- Если используете n8n: в его контейнере держите NO_PROXY максимально узким (только localhost/127.0.0.1/::1),
-  чтобы избежать «петли» обращения к прокси через прокси.
-- Если HTTPS-запросы через прокси висят, проверьте SNI/ALPN/параметры Reality на соответствие серверу.
-
+- В контейнерах-клиентах (например, n8n) держите NO_PROXY узким: "localhost,127.0.0.1,::1".
+- Прокси-адрес для HTTP(S):  http://${SERVICE_NAME}:3128    (в сети ${EXT_NET})
+- SOCKS5 при необходимости:  socks5h://${SERVICE_NAME}:1080
 EOF
