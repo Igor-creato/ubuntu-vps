@@ -45,7 +45,6 @@ import sys, urllib.parse
 print(urllib.parse.unquote(sys.argv[1]))
 PY
   else
-    # декодируем только корректные %HH, '+' -> пробел
     printf '%s' "$s" | awk '{
       out=""; i=1; n=length($0);
       while(i<=n){
@@ -114,10 +113,9 @@ parse_vless_url(){
   [[ "${security:-reality}" == "reality" ]] || warn "security=${security:-<пусто>} (скрипт рассчитан на Reality)"
 }
 
-# ====== проверки окружения ======
+# ====== проверки окружения (только наличие docker/compose, сеть проверим позже) ======
 ensure_cmd docker
 docker compose version >/dev/null 2>&1 || err "'docker compose' недоступен."
-docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена."
 
 # ====== ввод ссылки или ручной ввод ======
 read -rp "Вставьте VLESS URL (Enter — ручной ввод): " VLESS_URL || true
@@ -134,7 +132,7 @@ else
   until validate_uuid "$VLESS_UUID"; do read -rp "   UUID: " VLESS_UUID; done
 
   read -rp "SNI (напр. creativecommons.org): " SNI
-  while [[ -z "$SNI" ]]; do read -rp "   SNI: " SNI; done
+  while [[ -z "$SNI" ]]; do read -rp "   SNI: " SNI; end; done 2>/dev/null || while [[ -z "$SNI" ]]; do read -rp "   SNI: " SNI; done
 
   read -rp "Reality publicKey (pbk): " REALITY_PBK
   while [[ -z "$REALITY_PBK" ]]; do read -rp "   pbk: " REALITY_PBK; done
@@ -232,13 +230,19 @@ networks:
 YAML
 log "Создан: ${XRAY_DIR}/docker-compose.yml"
 
-# ====== запуск ======
+# ====== теперь проверяем сеть И запускаем ======
+if ! docker network inspect "$EXT_NET" >/dev/null 2>&1; then
+  err "Внешняя сеть '$EXT_NET' не найдена. Создай её отдельно и запусти:
+    docker network create $EXT_NET
+    docker compose -f ${XRAY_DIR}/docker-compose.yml up -d"
+fi
+
 log "Запуск docker compose в: ${XRAY_DIR}"
 pushd "${XRAY_DIR}" >/dev/null
 docker compose up -d
 popd >/dev/null
 
-# ====== мягкие самотесты ======
+# ====== мягкие самотесты (не мешают запуску) ======
 log "Проверка сетей контейнера '${SERVICE_NAME}':"
 docker inspect "${SERVICE_NAME}" --format '{{json .NetworkSettings.Networks}}' || true
 
