@@ -19,7 +19,7 @@ VPN_NET="${VPN_NET:-vpn}"   # имя внешней сети для VPN
 USE_VPN="${USE_VPN:-}"      # можно задать заранее USE_VPN=1/0, тогда вопрос не задастся
 
 if [[ -z "${USE_VPN}" ]]; then
-  read -r -p "[?] Устанавливать n8n с VPN (через xray-client) [y/N]: " _ans || true
+  read -r -p "[?] Устанавливать n8n с VPN (через xray-client) [y/n]: " _ans || true
   case "${_ans,,}" in
     y|yes) USE_VPN=1 ;;
     *)     USE_VPN=0 ;;
@@ -80,8 +80,8 @@ services:
       N8N_HOST: ${N8N_HOST}
       N8N_PORT: 5678
       N8N_PROTOCOL: https
-      N8N_EDITOR_BASE_URL: https://${N8N_HOST}
-      WEBHOOK_URL: https://${N8N_HOST}
+      N8N_EDITOR_BASE_URL: https://n8n.${N8N_HOST}
+      WEBHOOK_URL: https://n8n.${N8N_HOST}
       N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-1}
 
       GENERIC_TIMEZONE: Europe/Amsterdam
@@ -198,12 +198,10 @@ read -p "Введите доменное имя для n8n (например: ex
 echo "📝 Создаем .env файл"
 cat > .env << EOF
 # Доменное имя для n8n
-N8N_HOST="${N8N_HOST}"
+N8N_HOST="n8n.${N8N_HOST}"
 # ====== Базовые настройки n8n ======
 N8N_PROTOCOL=https
 N8N_PORT=5678
-N8N_EDITOR_BASE_URL=https://n8n.autmatization-bot.ru
-WEBHOOK_URL=https://n8n.autmatization-bot.ru
 
 # HTTPS → true, чтобы cookie были secure
 N8N_SECURE_COOKIE=true
