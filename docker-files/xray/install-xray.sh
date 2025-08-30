@@ -117,7 +117,7 @@ else
     read -rp "SERVER_PORT: " SERVER_PORT
     until validate_port "$SERVER_PORT"; do read -rp "   SERVER_PORT: " SERVER_PORT; done
   fi
-  if [[ -з "$VLESS_UUID" ]]; then  # защита от случайной кириллицы
+  if [[ -z "$VLESS_UUID" ]]; then  # защита от случайной кириллицы
     VLESS_UUID=""
   fi
   if [[ -z "$VLESS_UUID" ]]; then
