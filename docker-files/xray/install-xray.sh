@@ -278,19 +278,19 @@ popd >/dev/null
 log "Проверка сетей контейнера '${SERVICE_NAME}':"
 docker inspect "${SERVICE_NAME}" --format '{{json .NetworkSettings.Networks}}' || true
 
-cat <<'EOF'
+cat <<EOF
 
 Готово ✅
 
 Проверка из внешней docker-сети:
-  docker run --rm --network '"${EXT_NET}"' curlimages/curl:8.11.1 \
-    -sS -x http://'"${SERVICE_NAME}"':3128 https://api.ipify.org; echo
+  docker run --rm --network ${EXT_NET} curlimages/curl:8.11.1 \\
+    -sS -x http://${SERVICE_NAME}:3128 https://api.ipify.org; echo
 
 Логи Xray:
-  docker compose -f '"${XRAY_DIR}"'/docker-compose.yml logs --tail=100 '"${SERVICE_NAME}"'
-  docker compose -f '"${XRAY_DIR}"'/docker-compose.yml exec '"${SERVICE_NAME}"' sh -lc 'tail -n 50 /var/log/xray/access.log; echo; tail -n 50 /var/log/xray/error.log'
+  docker compose -f ${XRAY_DIR}/docker-compose.yml logs --tail=100 ${SERVICE_NAME}
+  docker compose -f ${XRAY_DIR}/docker-compose.yml exec ${SERVICE_NAME} sh -lc 'tail -n 50 /var/log/xray/access.log; echo; tail -n 50 /var/log/xray/error.log'
 
 Подсказки:
-- Прокси в контейнерах: HTTP -> http://'"${SERVICE_NAME}"':3128 , SOCKS5 -> socks5h://'"${SERVICE_NAME}"':1080
+- Прокси в контейнерах: HTTP -> http://${SERVICE_NAME}:3128 , SOCKS5 -> socks5h://${SERVICE_NAME}:1080
 - Если не работает HTTPS через прокси — проверьте SNI/pbk/shortId/fingerprint/spiderX и соответствие flow серверу.
 EOF
