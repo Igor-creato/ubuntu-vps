@@ -61,7 +61,7 @@ validate_uuid() {
 }
 
 validate_port() {
-  [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+  [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
 }
 
 validate_host_no_port() {
@@ -89,7 +89,7 @@ docker compose version >/dev/null 2>&1 || err "'docker compose' недоступ
 docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена. Создайте:  docker network create $EXT_NET"
 
 ########################################
-# НОВОЕ: Ввод VLESS URL (опционально). Если введён — парсим и отключаем ручной ввод.
+# Ввод VLESS URL (опционально). Если введён — парсим и отключаем ручной ввод.
 ########################################
 DO_INTERACTIVE=1
 read -rp "Вставьте VLESS URL (Enter — ручной ввод): " VLESS_URL || true
@@ -150,10 +150,10 @@ if [[ -n "${VLESS_URL}" ]]; then
   fi
   [[ -n "$local_flow" ]] && FLOW="$local_flow"
 
-  # Лёгкая валидация
+  # Лёгкая валидация (всегда 2 операнда, даже если пусто)
   validate_uuid "$VLESS_UUID" || err "UUID из ссылки некорректен."
-  validate_port "$SERVER_PORT" || err "Порт из ссылки некорректен."
-  [[ -n "$SERVER_HOST" ]] || err "Хост в ссылке пустой."
+  validate_port "${SERVER_PORT:-0}" || err "Порт из ссылки некорректен."
+  [[ -n "${SERVER_HOST}" ]] || err "Хост в ссылке пустой."
   [[ "${local_sec:-}" == "reality" ]] || log "Предупреждение: security='${local_sec:-}' (ожидалось 'reality')."
   [[ "${local_type:-}" == "tcp" ]] || log "Предупреждение: type='${local_type:-}' (ожидалось 'tcp')."
 
@@ -164,52 +164,52 @@ fi
 ########################################
 # Интерактивные вопросы (минимально необходимое)
 ########################################
-if (( DO_INTERACTIVE )); then
+if [[ "${DO_INTERACTIVE}" -eq 1 ]]; then
   # Host
-  if [[ -z "$SERVER_HOST" ]]; then
-    read -rp "1) SERVER_HOST (домен/IP сервера, БЕЗ порта): " SERVER_HOST
-    while ! validate_host_no_port "$SERVER_HOST" || [[ -z "$SERVER_HOST" ]]; do
+  if [[ -z "${SERVER_HOST}" ]] || ! validate_host_no_port "${SERVER_HOST}"; then
+    while true; do
+      read -rp "1) SERVER_HOST (домен/IP сервера, БЕЗ порта): " SERVER_HOST
+      [[ -n "${SERVER_HOST}" ]] && validate_host_no_port "${SERVER_HOST}" && break
       echo "   Неверно. Укажите домен/IP БЕЗ :порт"
-      read -rp "   SERVER_HOST: " SERVER_HOST
     done
   fi
 
   # Port
-  if [[ -z "$SERVER_PORT" ]]; then
-    read -rp "2) SERVER_PORT: " SERVER_PORT
-    while ! validate_port "$SERVER_PORT"; do
+  if ! validate_port "${SERVER_PORT:-}"; then
+    while true; do
+      read -rp "2) SERVER_PORT: " SERVER_PORT
+      validate_port "${SERVER_PORT}" && break
       echo "   Порт должен быть от 1 до 65535."
-      read -rp "   SERVER_PORT: " SERVER_PORT
     done
   fi
 
   # UUID
-  if [[ -z "$VLESS_UUID" ]]; then
-    read -rp "3) VLESS UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): " VLESS_UUID
-    until validate_uuid "$VLESS_UUID"; do
+  if ! validate_uuid "${VLESS_UUID:-}"; then
+    while true; do
+      read -rp "3) VLESS UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): " VLESS_UUID
+      validate_uuid "${VLESS_UUID}" && break
       echo "   Неверный формат UUID."
-      read -rp "   Повторите UUID: " VLESS_UUID
     done
   fi
 
   # Reality: SNI
-  if [[ -z "$SNI" ]]; then
-    read -rp "4) Reality SNI/ServerName (напр. creativecommons.org): " SNI
-    while [[ -z "$SNI" ]]; do
-      read -rp "   Введите SNI: " SNI
+  if [[ -z "${SNI}" ]]; then
+    while true; do
+      read -rp "4) Reality SNI/ServerName (напр. creativecommons.org): " SNI
+      [[ -n "${SNI}" ]] && break
     done
   fi
 
   # Reality: pbk
-  if [[ -z "$REALITY_PBK" ]]; then
-    read -rp "5) Reality publicKey (pbk=): " REALITY_PBK
-    while [[ -z "$REALITY_PBK" ]]; do
-      read -rp "   Введите publicKey: " REALITY_PBK
+  if [[ -z "${REALITY_PBK}" ]]; then
+    while true; do
+      read -rp "5) Reality publicKey (pbk=): " REALITY_PBK
+      [[ -n "${REALITY_PBK}" ]] && break
     done
   fi
 
   # Reality: sid (можно пусто)
-  if [[ -z "$REALITY_SHORT_ID" ]]; then
+  if [[ -z "${REALITY_SHORT_ID}" ]]; then
     read -rp "6) Reality shortId (sid=) [можно пусто]: " REALITY_SHORT_ID || true
   fi
 
@@ -379,4 +379,5 @@ cat <<EOF
 
 Подсказки:
 - Прокси в контейнерах: HTTP -> http://${SERVICE_NAME}:3128 , SOCKS5 -> socks5h://${SERVICE_NAME}:1080
-- Если не работает HTTPS через прокси — проверьте SNI/pbk/shortId/fingerprint/spiderX и соответствие
+- Если не работает HTTPS через прокси — проверьте SNI/pbk/shortId/fingerprint/spiderX и соответствие flow серверу.
+EOF
