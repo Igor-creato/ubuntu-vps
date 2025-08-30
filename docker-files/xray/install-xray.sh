@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # install-xray.sh — VLESS TCP + Reality в Docker Compose (~/xray)
-# Пример ссылки:
 # vless://UUID@HOST:PORT?type=tcp&security=reality&pbk=...&fp=chrome&sni=...&sid=...&spx=%2F&flow=xtls-rprx-vision
 
+# Безопасные опции
 set -eE -o pipefail
 set -o errtrace
 trap 'echo -e "[\e[31mERROR\e[0m] $(date +%F\ %T) На строке $LINENO произошла ошибка. См. вывод выше." >&2' ERR
 
-# ====== дефолты (можно переопределить ENV) ======
+# ====== Дефолты ======
 XRAY_DIR="${XRAY_DIR:-$HOME/xray}"
 EXT_NET="${EXT_NET:-proxy}"
 SERVICE_NAME="${SERVICE_NAME:-xray-client}"
@@ -26,7 +26,7 @@ FINGERPRINT="${FINGERPRINT:-chrome}"
 SPIDERX="${SPIDERX:-/}"
 FLOW="${FLOW:-xtls-rprx-vision}"
 
-# ====== утилиты ======
+# ====== Утилиты ======
 log()  { echo -e "[\e[34mINFO\e[0m]  $(date +'%F %T')  $*"; }
 warn() { echo -e "[\e[33mWARN\e[0m]  $(date +'%F %T')  $*"; }
 err()  { echo -e "[\e[31mERROR\e[0m] $(date +'%F %T')  $*" >&2; exit 1; }
@@ -36,7 +36,7 @@ validate_uuid(){ [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-
 validate_port(){ [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1>=1 && 10#$1<=65535 )); }
 validate_host_no_port(){ [[ -n "$1" && "$1" != *:* ]]; }
 
-# Надёжный URL-decode (python3 при наличии; иначе bash-фолбэк)
+# Надёжный URL-decode: python3 (если есть) -> awk-фолбэк
 urldecode(){
   local s="$1"
   if command -v python3 >/dev/null 2>&1; then
@@ -45,18 +45,22 @@ import sys, urllib.parse
 print(urllib.parse.unquote(sys.argv[1]))
 PY
   else
-    # декодируем только корректные %hh
-    local out="${s//+/ }"
-    out=$(printf '%s' "$out" | awk '{
-      while (match($0,/%[0-9A-Fa-f][0-9A-Fa-f]/)) {
-        hex=substr($0,RSTART+1,2);
-        printf "%s", substr($0,1,RSTART-1);
-        printf "%c", strtonum("0x"hex);
-        $0=substr($0,RSTART+3)
+    # Декодируем только корректные %HH, остальное оставляем как есть
+    printf '%s' "$s" | awk '{
+      out=""; i=1; n=length($0);
+      while(i<=n){
+        c=substr($0,i,1);
+        if(c=="%" && i+2<=n){
+          h=substr($0,i+1,2);
+          if(h ~ /^[0-9A-Fa-f][0-9A-Fa-f]$/){
+            printf "%c", strtonum("0x"h); i+=3; next
+          }
+        }
+        if(c=="+"){ c=" " }
+        out=out c; i++
       }
-      print $0
-    }')
-    printf '%s' "$out"
+      print out
+    }'
   fi
 }
 
@@ -65,7 +69,7 @@ parse_vless_url() {
   [[ "$url" == vless://* ]] || err "Ссылка должна начинаться с vless://"
 
   local rest="${url#vless://}"               # UUID@host:port?query#tag
-  local uuid="${rest%%@*}"                   # до @
+  local uuid="${rest%%@*}"
   local after_at="${rest#*@}"
   [[ "$after_at" == "$rest" ]] && err "Некорректная ссылка: отсутствует '@'"
 
@@ -75,24 +79,18 @@ parse_vless_url() {
 
   local query="${after_at#*\?}"; query="${query%%#*}"
 
-  # разбираем query
   local type="" security="" pbk="" fp="" sni="" sid="" spx="" flow=""
   if [[ -n "$query" && "$query" != "$after_at" ]]; then
     IFS='&' read -r -a _pairs <<< "$query"
     for pair in "${_pairs[@]}"; do
       [[ -z "$pair" ]] && continue
-      local k="${pair%%=*}"
-      local v=""; [[ "$pair" == *"="* ]] && v="${pair#*=}"
+      local k="${pair%%=*}" v=""; [[ "$pair" == *"="* ]] && v="${pair#*=}"
       v="$(urldecode "$v")"
       case "$k" in
-        type) type="$v" ;;
-        security) security="$v" ;;
-        pbk) pbk="$v" ;;
-        fp) fp="$v" ;;
-        sni) sni="$v" ;;
-        sid) sid="$v" ;;
-        spx) spx="$v" ;;
-        flow) flow="$v" ;;
+        type) type="$v" ;; security) security="$v" ;;
+        pbk) pbk="$v" ;; fp) fp="$v" ;;
+        sni) sni="$v" ;; sid) sid="$v" ;;
+        spx) spx="$v" ;; flow) flow="$v" ;;
       esac
     done
   fi
@@ -120,9 +118,9 @@ parse_vless_url() {
 # ====== проверки окружения ======
 ensure_cmd docker
 docker compose version >/dev/null 2>&1 || err "'docker compose' недоступен. Установите Docker Compose."
-docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена. Создайте:  docker network create $EXT_NET"
+docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена."
 
-# ====== запрос ссылки (или ручной ввод) ======
+# ====== ввод ссылки (или ручной ввод) ======
 read -rp "Вставьте VLESS URL (Enter — ручной ввод): " VLESS_URL || true
 if [[ -n "${VLESS_URL:-}" ]]; then
   parse_vless_url "$VLESS_URL"
@@ -153,14 +151,13 @@ else
   read -rp "flow [${FLOW}]: " _flow || true; FLOW="${_flow:-$FLOW}"
 fi
 
-# Кратко покажем параметры
+# ====== лог и директории ======
 log "Параметры: host=${SERVER_HOST} port=${SERVER_PORT} uuid=${VLESS_UUID}"
 log "Reality: sni=${SNI} pbk=${REALITY_PBK} sid=${REALITY_SHORT_ID:-<пусто>} fp=${FINGERPRINT} spx=${SPIDERX} flow=${FLOW:-<пусто>}"
-
-# ====== каталоги и env ======
 log "Каталоги: ${XRAY_DIR}/xray и ${XRAY_DIR}/logs"
 mkdir -p "${XRAY_DIR}/xray" "${XRAY_DIR}/logs"
 
+# ====== env.example ======
 backup_if_exists "${XRAY_DIR}/env.example"
 cat > "${XRAY_DIR}/env.example" <<EOF
 XRAY_DIR=${XRAY_DIR}
@@ -187,6 +184,7 @@ log "Создан: ${XRAY_DIR}/env.example"
 backup_if_exists "${XRAY_DIR}/xray/config.json"
 USER_JSON="\"id\": \"${VLESS_UUID}\", \"encryption\": \"none\""
 [[ -n "${FLOW}" ]] && USER_JSON="${USER_JSON}, \"flow\": \"${FLOW}\""
+
 SHORTID_JSON=""
 if [[ -n "${REALITY_SHORT_ID}" ]]; then
   printf -v SHORTID_JSON ',\n          "shortId": "%s"' "${REALITY_SHORT_ID}"
@@ -266,7 +264,7 @@ networks:
 YAML
 log "Создан: ${XRAY_DIR}/docker-compose.yml"
 
-# ====== запуск и автопроверка ======
+# ====== запуск и проверка ======
 log "Запуск docker compose в: ${XRAY_DIR}"
 pushd "${XRAY_DIR}" >/dev/null
 docker compose pull
@@ -282,7 +280,7 @@ if docker run --rm --network "${EXT_NET}" curlimages/curl:8.11.1 \
   HTTP_IP=$(cat /tmp/xray_ip_http); rm -f /tmp/xray_ip_http
   log "HTTP-прокси внешний IP: ${HTTP_IP}"
 else
-  warn "HTTP-прокси тест не прошёл — продолжаю (проверьте VLESS URL, sni/pbk/sid/fp/spx/flow)."
+  warn "HTTP-прокси тест не прошёл — проверь VLESS URL/sni/pbk/sid/fp/spx/flow."
 fi
 
 log "Проверка SOCKS5-прокси через контейнер curl..."
@@ -291,7 +289,7 @@ if docker run --rm --network "${EXT_NET}" curlimages/curl:8.11.1 \
   SOCKS_IP=$(cat /tmp/xray_ip_socks); rm -f /tmp/xray_ip_socks
   log "SOCKS5-прокси внешний IP: ${SOCKS_IP}"
 else
-  warn "SOCKS5-прокси тест не прошёл — продолжаю."
+  warn "SOCKS5-прокси тест не прошёл."
 fi
 
 cat <<EOF
@@ -306,8 +304,4 @@ cat <<EOF
   docker compose -f ${XRAY_DIR}/docker-compose.yml logs --tail=100 ${SERVICE_NAME}
   docker compose -f ${XRAY_DIR}/docker-compose.yml exec ${SERVICE_NAME} sh -lc 'tail -n 50 /var/log/xray/error.log; echo; tail -n 50 /var/log/xray/access.log'
 
-Подсказки:
-- Прокси в контейнерах: HTTP -> http://${SERVICE_NAME}:${HTTP_PORT} , SOCKS5 -> socks5h://${SERVICE_NAME}:${SOCKS_PORT}
-- NO_PROXY держите минимальным: NO_PROXY=localhost,127.0.0.1,::1
-- Если HTTPS не ходит — перепроверьте sni/pbk/sid/fingerprint/spiderX и flow.
 EOF
