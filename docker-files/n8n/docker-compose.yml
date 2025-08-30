@@ -25,9 +25,41 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      - HTTP_PROXY=http://xray-client:3128
-      - HTTPS_PROXY=http://xray-client:3128
-      - NO_PROXY=localhost,127.0.0.1,::1,n8n,n8n-n8n-1,traefik,traefik-traefik-1,postgres,n8n-postgres-1,wp-app,wp-db,wp-pma,supabase-db,supabase-pooler,supabase-auth,supabase-rest,supabase-realtime,supabase-storage,supabase-studio,supabase-meta,supabase-edge-functions,supabase-analytics,supabase-imgproxy,supabase-vector,supabase-kong,realtime-dev.supabase-realtime
+      # 1) Отключить community nodes целиком (чтобы /rest/community-node-types не тормозил UI)
+      - N8N_COMMUNITY_PACKAGES_ENABLED: "false"     # дока: Environment variables → Nodes
+      - N8N_VERIFIED_PACKAGES_ENABLED: "false"
+      - N8N_UNVERIFIED_PACKAGES_ENABLED: "false"
+
+      # 2) Рекомендации от n8n (deprecation в логах)
+      - N8N_RUNNERS_ENABLED: "true"                 # дока: Task runners
+      # (остальные настройки раннеров не нужны, если вы в "internal" — это дефолт)
+
+      # 3) Базовые URL и пресеты для реверс-прокси (проверьте Ваш домен!)
+      - N8N_HOST: "n8n.automatization-bot.ru"
+      - N8N_PROTOCOL: "https"
+      - N8N_PORT: "5678"
+      - N8N_EDITOR_BASE_URL: "https://n8n.automatization-bot.ru"
+      - WEBHOOK_URL: "https://n8n.automatization-bot.ru"
+      - N8N_PROXY_HOPS: "1"                         # за одним внешним прокси (Traefik)
+      - N8N_SECURE_COOKIE: "true"                   # true при HTTPS
+
+        # 4) Телеметрия/персонализация, чтобы исключить внешние вызовы
+      - N8N_DIAGNOSTICS_ENABLED: "false"
+      - N8N_PERSONALIZATION_ENABLED: "false"
+
+        # 5) Прокси (у вас уже есть, оставляю как напоминание)
+      - HTTP_PROXY:  "http://xray-client:3128"
+      - HTTPS_PROXY: "http://xray-client:3128"
+      - ALL_PROXY:   "http://xray-client:3128"
+      - NO_PROXY:    "localhost,127.0.0.1,::1,n8n,n8n-n8n-1,traefik,traefik-traefik-1,postgres,n8n-postgres-1,wp-app,wp-db,wp-pma,supabase-db,supabase-pooler,supabase-auth,supabase-rest,supabase-realtime,supabase-storage,supabase-studio,supabase-meta,supabase-edge-functions,supabase-analytics,supabase-imgproxy,supabase-vector,supabase-kong,realtime-dev.supabase-realtime,*.local,*.lan"
+      - http_proxy:  "http://xray-client:3128"
+      - https_proxy: "http://xray-client:3128"
+      - all_proxy:   "http://xray-client:3128"
+      - no_proxy:    "localhost,127.0.0.1,::1,n8n,n8n-n8n-1,traefik,traefik-traefik-1,postgres,n8n-postgres-1,wp-app,wp-db,wp-pma,supabase-db,supabase-pooler,supabase-auth,supabase-rest,supabase-realtime,supabase-storage,supabase-studio,supabase-meta,supabase-edge-functions,supabase-analytics,supabase-imgproxy,supabase-vector,supabase-kong,realtime-dev.supabase-realtime,*.local,*.lan"
+
+        # 6) Исправляем предупреждение о правах на файл настроек
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"  # выставит 0600 на ~/.n8n/config
+
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
