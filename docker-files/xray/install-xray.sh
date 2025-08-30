@@ -203,13 +203,13 @@ if (( DO_INTERACTIVE )); then
   # Reality: pbk
   if [[ -z "$REALITY_PBK" ]]; then
     read -rp "5) Reality publicKey (pbk=): " REALITY_PBK
-    while [[ -з "$REALITY_PBK" ]]; do
+    while [[ -z "$REALITY_PBK" ]]; do
       read -rp "   Введите publicKey: " REALITY_PBK
     done
   fi
 
   # Reality: sid (можно пусто)
-  if [[ -з "$REALITY_SHORT_ID" ]]; then
+  if [[ -z "$REALITY_SHORT_ID" ]]; then
     read -rp "6) Reality shortId (sid=) [можно пусто]: " REALITY_SHORT_ID || true
   fi
 
