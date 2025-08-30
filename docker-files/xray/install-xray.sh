@@ -2,9 +2,9 @@
 # install-xray.sh
 # Автоматически разворачивает Xray (VLESS-клиент) в Docker Compose в ~/xray
 # и СОЗДАЁТ все файлы:
-#   - ./xray/config.json        (конфиг Xray под ваши параметры)
-#   - ./docker-compose.yml      (стек Docker)
-#   - ./env.example             (шаблон переменных — для повторного запуска)
+#   - ./xray/config.json
+#   - ./docker-compose.yml
+#   - ./env.example
 #
 # Особенности:
 # - HTTP-прокси (3128) и SOCKS5 (1080) доступны ТОЛЬКО внутри внешней docker-сети 'proxy' (ports наружу не открываем).
@@ -16,18 +16,7 @@
 # Документация:
 #   Docker/Compose: https://docs.docker.com/
 #   Xray/Reality:  https://xtls.github.io/
-#
-# Запуск:
-#   Интерактивно:   bash install-xray.sh
-#   Неинтерактивно: см. флаги ниже или экспортируйте одноимённые переменные окружения.
-#
-# Примеры:
-#   bash install-xray.sh --server-host mybestestsite.chickenkiller.com --server-port 32479 \
-#     --uuid d2101c70-18c4-44f0-81ef-84fd1182a04a \
-#     --transport tcp --security reality --sni creativecommons.org \
-#     --reality-pbk AXgdgctFCBJJnQpmUYZH9YR86ada_CffUCRweKqXAXs \
-#     --reality-shortid bdac8364c4 --fingerprint chrome --flow xtls-rprx-vision --spiderx /
-#
+
 set -Eeuo pipefail
 
 ########################################
@@ -49,21 +38,21 @@ TRANSPORT="${TRANSPORT:-tcp}"               # tcp | ws
 SECURITY="${SECURITY:-tls}"                 # tls | reality | none
 
 # TLS:
-SNI="${SNI:-}"                              # serverName (обычно = сайт-приманка / желаемое имя)
+SNI="${SNI:-}"                              # serverName
 ALPN="${ALPN:-http/1.1}"                    # http/1.1 | h2
-ALLOW_INSECURE="${ALLOW_INSECURE:-false}"   # для tlsSettings.allowInsecure (true/false)
+ALLOW_INSECURE="${ALLOW_INSECURE:-false}"   # true|false
 
 # WebSocket:
-WS_PATH="${WS_PATH:-/vless}"                # путь для ws (если выбран ws)
+WS_PATH="${WS_PATH:-/vless}"                # для ws
 
 # Reality:
 REALITY_PBK="${REALITY_PBK:-}"              # publicKey (pbk=)
 REALITY_SHORT_ID="${REALITY_SHORT_ID:-}"    # shortId (sid=)
-FINGERPRINT="${FINGERPRINT:-chrome}"        # fp= (chrome|firefox|...)
-SPIDERX="${SPIDERX:-}"                      # spx=  (опционально, путь «маски»)
+FINGERPRINT="${FINGERPRINT:-chrome}"        # fp=
+SPIDERX="${SPIDERX:-}"                      # spx= (опц.)
 
 # Дополнительно:
-FLOW="${FLOW:-}"                             # flow= (например xtls-rprx-vision), опционально
+FLOW="${FLOW:-}"                             # flow= (опц., напр. xtls-rprx-vision)
 
 ########################################
 # Вспомогательные
@@ -100,12 +89,10 @@ usage() {
   --reality-pbk KEY          Reality publicKey (pbk=)
   --reality-shortid ID       Reality shortId (sid=)
   --fingerprint STR          Fingerprint (по умолчанию: chrome)
-  --spiderx PATH             Reality spiderX (опционально, соответствует spx=)
+  --spiderx PATH             Reality spiderX (опционально)
 
   # Дополнительно:
   --flow STR                 flow (например xtls-rprx-vision) — опционально
-
-Примеры см. в шапке файла.
 USAGE
 }
 
@@ -124,7 +111,7 @@ validate_uuid() {
 }
 
 ########################################
-# Аргументы
+# Аргументы (исправлено: esac, без лишних конструкций)
 ########################################
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -149,7 +136,7 @@ while [[ $# -gt 0 ]]; do
     --spiderx) SPIDERX="$2"; shift 2 ;;
     --flow) FLOW="$2"; shift 2 ;;
     *) err "Неизвестный аргумент: $1 (см. --help)";;
-  endesac || true
+  esac
 done
 
 ########################################
@@ -213,24 +200,23 @@ fi
 if [[ "$SECURITY" == "reality" ]]; then
   if [[ -z "$SNI" ]]; then
     read -rp "7) Reality SNI/ServerName (маскировка) [например creativecommons.org]: " SNI
-    while [[ -z "$SNI" ]]; do read -rp "   Введи SNI: " SNI; done
+    while [[ -з "$SNI" ]]; do read -rp "   Введи SNI: " SNI; done
   fi
-  if [[ -z "$REALITY_PBK" ]]; then
+  if [[ -з "$REALITY_PBK" ]]; then
     read -rp "8) Reality publicKey (pbk=): " REALITY_PBK
-    while [[ -z "$REALITY_PBK" ]]; do read -rp "   Введи publicKey: " REALITY_PBK; done
+    while [[ -з "$REALITY_PBK" ]]; do read -rp "   Введи publicKey: " REALITY_PBK; done
   fi
   if [[ -z "$REALITY_SHORT_ID" ]]; then
     read -rp "9) Reality shortId (sid=) [можно пусто]: " REALITY_SHORT_ID || true
   fi
   read -rp "10) Reality fingerprint [${FINGERPRINT}] (chrome|firefox|...): " _fp || true; FINGERPRINT="${_fp:-$FINGERPRINT}"
   read -rp "11) Reality spiderX (spx=) [опц., например /]: " _spx || true; SPIDERX="${_spx:-$SPIDERX}"
-  # Для Reality по умолчанию нередко используют flow vision:
   if [[ -z "$FLOW" ]]; then
     read -rp "12) flow (например xtls-rprx-vision) [пусто = не использовать]: " FLOW || true
   fi
 fi
 
-# Общее flow (если хотим задать независимо)
+# Общее flow (если не задано)
 if [[ -z "$FLOW" ]]; then
   read -rp "13) flow (опционально, пусто чтобы пропустить): " FLOW || true
 fi
@@ -246,7 +232,6 @@ mkdir -p "${XRAY_DIR}/xray" "${XRAY_DIR}/logs"
 ########################################
 backup_if_exists "${XRAY_DIR}/env.example"
 cat > "${XRAY_DIR}/env.example" <<ENV
-# Шаблон переменных для install-xray.sh (можно source && bash install-xray.sh)
 XRAY_DIR=${XRAY_DIR}
 EXT_NET=${EXT_NET}
 SERVICE_NAME=${SERVICE_NAME}
@@ -281,8 +266,6 @@ log "Создан: ${XRAY_DIR}/env.example"
 ########################################
 STREAM_SETTINGS=""
 if [[ "$SECURITY" == "reality" ]]; then
-  # Reality поверх TCP
-  # (dest на клиенте не задаём — это настройка сервера)
   STREAM_SETTINGS=$(cat <<JSON
 "network": "tcp",
 "security": "reality",
@@ -317,9 +300,9 @@ JSON
 JSON
 )
   else
-    err "Комбинация transport=ws и security=$SECURITY не поддержана логикой скрипта."
+    err "Комбинация transport=ws и security=$SECURITY не поддержана."
   fi
-else # TCP
+else
   if [[ "$SECURITY" == "tls" ]]; then
     STREAM_SETTINGS=$(cat <<JSON
 "network": "tcp",
@@ -338,7 +321,7 @@ JSON
 JSON
 )
   else
-    err "Комбинация transport=tcp и security=$SECURITY не поддержана логикой скрипта."
+    err "Комбинация transport=tcp и security=$SECURITY не поддержана."
   fi
 fi
 
@@ -423,14 +406,14 @@ docker compose pull
 docker compose up -d
 popd >/dev/null
 
-log "Проверка сети '${EXT_NET}':"
+log "Проверка, что контейнер в сети '${EXT_NET}':"
 docker inspect "${SERVICE_NAME}" --format '{{json .NetworkSettings.Networks}}' || true
 
 cat <<EOF
 
 Готово ✅
 
-Проверка из той же сети '${EXT_NET}':
+Проверка из сети '${EXT_NET}':
   docker run --rm --network ${EXT_NET} curlimages/curl:8.11.1 \\
     -sS -x http://${SERVICE_NAME}:3128 https://api.ipify.org; echo
 
@@ -441,5 +424,5 @@ cat <<EOF
 Подсказки:
 - Для n8n держите NO_PROXY узким: "localhost,127.0.0.1,::1".
 - Прокси в контейнерах: HTTP -> http://${SERVICE_NAME}:3128 , SOCKS5 -> socks5h://${SERVICE_NAME}:1080
-- Если HTTPS через прокси висит — проверьте SNI/ALPN/Reality (pbk/shortId/fingerprint/spiderX) и что flow согласован с сервером.
+- Если HTTPS через прокси висит — проверьте SNI/ALPN/Reality (pbk/shortId/fingerprint/spiderX) и согласованность flow.
 EOF
