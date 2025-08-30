@@ -23,8 +23,8 @@ restart with vpn
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d --force-recreate n8n
 ```
-# быстрый "bounce" без пересоздания:
-# docker compose -f docker-compose.yml -f docker-compose.vpn.yml restart n8n
+быстрый "bounce" без пересоздания:
+docker compose -f docker-compose.yml -f docker-compose.vpn.yml restart n8n
 
 install supabase
 ```bash
