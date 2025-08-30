@@ -23,7 +23,7 @@ set -Eeuo pipefail
 XRAY_DIR="${XRAY_DIR:-$HOME/xray}"          # каталог проекта
 EXT_NET="${EXT_NET:-vpn}"                   # внешняя docker-сеть для n8n + xray (создадим, если её нет)
 SERVICE_NAME="${SERVICE_NAME:-xray-client}" # имя контейнера
-XRAY_IMAGE="${XRAY_IMAGE:-teddysun/xray:1.8.23}"
+XRAY_IMAGE="${XRAY_IMAGE:-ghcr.io/xtls/xray-core:25.8.29}"
 
 HTTP_PORT="${HTTP_PORT:-3128}"              # внутренний HTTP-прокси порт в контейнере
 SOCKS_PORT="${SOCKS_PORT:-1080}"            # внутренний SOCKS5 порт в контейнере
@@ -347,6 +347,8 @@ services:
     image: ${XRAY_IMAGE}
     container_name: ${SERVICE_NAME}
     restart: unless-stopped
+    environment:
+      - TZ=Europe/Amsterdam
     volumes:
       - ./xray/config.json:/etc/xray/config.json:ro
       - ./logs:/var/log/xray
@@ -354,10 +356,21 @@ services:
       - ${EXT_NET}
     # Порты наружу НЕ публикуем: доступ к 3128/1080 только из сети '${EXT_NET}'
     healthcheck:
-      test: ["CMD", "/usr/bin/xray", "-version"]
+      test: ["CMD-SHELL", "/usr/bin/xray -test -config /etc/xray/config.json >/dev/null 2>&1 && /usr/bin/xray -version"]
       interval: 30s
       timeout: 5s
       retries: 5
+    # Немного безопасности и чистоты логов Docker
+    security_opt:
+      - no-new-privileges:true
+    read_only: false               # нужен rw для /var/log/xray; не ставим true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   ${EXT_NET}:
