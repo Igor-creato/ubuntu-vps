@@ -10,6 +10,10 @@ N8N_DIR="$HOME/n8n"
 echo "📁 Создаем рабочую директорию: $N8N_DIR"
 mkdir -p "$N8N_DIR"
 cd "$N8N_DIR"
+# >>> NEW: имя внешней сети для VPN
+VPN_NET="${VPN_NET:-vpn}"
+# <<< NEW
+
 
 
 # Останавливаем и удаляем старые контейнеры
@@ -121,6 +125,7 @@ services:
     networks:
       - n8n_internal
       - proxy
+      - vpn
 
 networks:
   n8n_internal:
@@ -224,6 +229,14 @@ echo ""
 
 # Ожидаем подтверждения
 read -p "Нажмите Enter чтобы продолжить..."
+
+# >>> NEW: создать внешнюю сеть VPN, если её нет
+if ! docker network inspect "${VPN_NET}" >/dev/null 2>&1; then
+  echo "[INFO]  $(date +'%F %T')  Сеть '${VPN_NET}' не найдена — создаю..."
+  docker network create "${VPN_NET}"
+fi
+# <<< NEW
+
 
 # Запускаем docker-compose
 echo "🐳 Запускаем n8n с помощью Docker Compose"

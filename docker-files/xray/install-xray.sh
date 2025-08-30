@@ -7,7 +7,7 @@
 #   - ./env.example
 #
 # Особенности:
-# - HTTP (3128) и SOCKS5 (1080) доступны только во внешней docker-сети 'proxy' (порты наружу не пробрасываются).
+# - HTTP (3128) и SOCKS5 (1080) доступны только внутри docker-сети EXT_NET (по умолчанию 'vpn').
 # - Весь трафик inbounds → vless-out (жёсткая маршрутизация).
 # - Запрашиваются только параметры, нужные для VLESS TCP + Reality.
 #
@@ -21,7 +21,7 @@ set -Eeuo pipefail
 # Параметры по умолчанию (можно переопределить переменными окружения)
 ########################################
 XRAY_DIR="${XRAY_DIR:-$HOME/xray}"          # каталог проекта
-EXT_NET="${EXT_NET:-proxy}"                 # внешняя docker-сеть (уже должна существовать)
+EXT_NET="${EXT_NET:-vpn}"                   # внешняя docker-сеть для n8n + xray (создадим, если её нет)
 SERVICE_NAME="${SERVICE_NAME:-xray-client}" # имя контейнера
 XRAY_IMAGE="${XRAY_IMAGE:-teddysun/xray:1.8.23}"
 
@@ -81,12 +81,26 @@ qget() {
   printf '%s\n' "$q" | tr '&' '\n' | sed -n "s/^${key}=//p" | head -n1
 }
 
+# Создать docker-сеть, если её нет
+ensure_network() {
+  local net="$1"
+  if ! docker network inspect "$net" >/dev/null 2>&1; then
+    log "Сеть '$net' не найдена — создаю..."
+    docker network create "$net"
+    log "Сеть '$net' создана."
+  else
+    log "Сеть '$net' уже существует."
+  fi
+}
+
 ########################################
 # Проверки окружения
 ########################################
 ensure_cmd docker
 docker compose version >/dev/null 2>&1 || err "'docker compose' недоступен. Установите Docker Compose."
-docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена. Создайте:  docker network create $EXT_NET"
+
+# ВАЖНО: вместо жёсткой проверки — создаём сеть EXT_NET (по умолчанию 'vpn')
+ensure_network "$EXT_NET"
 
 ########################################
 # Ввод VLESS URL (опционально). Если введён — парсим и отключаем ручной ввод.
@@ -114,10 +128,8 @@ if [[ -n "${VLESS_URL}" ]]; then
   local_qfrag="${local_hostport_qfrag#*\?}"
   local_query="$local_qfrag"
   if [[ "$local_hostport_qfrag" == "$local_hostport" ]]; then
-    # нет '?', значит нет query
     local_query=""
   else
-    # отрежем фрагмент #...
     local_query="${local_query%%\#*}"
   fi
 
@@ -150,7 +162,7 @@ if [[ -n "${VLESS_URL}" ]]; then
   fi
   [[ -n "$local_flow" ]] && FLOW="$local_flow"
 
-  # Лёгкая валидация (всегда 2 операнда, даже если пусто)
+  # Лёгкая валидация
   validate_uuid "$VLESS_UUID" || err "UUID из ссылки некорректен."
   validate_port "${SERVER_PORT:-0}" || err "Порт из ссылки некорректен."
   [[ -n "${SERVER_HOST}" ]] || err "Хост в ссылке пустой."
@@ -369,15 +381,31 @@ cat <<EOF
 
 Готово ✅
 
-Проверка из внешней docker-сети:
+Проверка из сети '${EXT_NET}':
   docker run --rm --network ${EXT_NET} curlimages/curl:8.11.1 \\
     -sS -x http://${SERVICE_NAME}:3128 https://api.ipify.org; echo
 
-Логи Xray:
-  docker compose -f ${XRAY_DIR}/docker-compose.yml logs --tail=100 ${SERVICE_NAME}
-  docker compose -f ${XRAY_DIR}/docker-compose.yml exec ${SERVICE_NAME} sh -lc 'tail -n 50 /var/log/xray/access.log; echo; tail -n 50 /var/log/xray/error.log'
+Подключение n8n к VPN:
+  # в проекте ~/n8n создайте docker-compose.override.yml:
+  #
+  # services:
+  #   n8n:
+  #     networks:
+  #       - proxy   # для Traefik
+  #       - vpn     # доступ к xray-client
+  #     environment:
+  #       HTTP_PROXY:  http://${SERVICE_NAME}:3128
+  #       HTTPS_PROXY: http://${SERVICE_NAME}:3128
+  #       NO_PROXY: >-
+  #         localhost,127.0.0.1,::1,n8n,n8n-n8n-1,postgres,n8n-postgres-1,traefik,traefik-traefik-1,*.local,*.lan
+  #
+  # networks:
+  #   vpn:
+  #     external: true
+  #   proxy:
+  #     external: true
 
 Подсказки:
-- Прокси в контейнерах: HTTP -> http://${SERVICE_NAME}:3128 , SOCKS5 -> socks5h://${SERVICE_NAME}:1080
-- Если не работает HTTPS через прокси — проверьте SNI/pbk/shortId/fingerprint/spiderX и соответствие flow серверу.
+- Xray изолирован в сети '${EXT_NET}' (по умолчанию 'vpn'), доступ извне не требуется.
+- Traefik НЕ должен проксировать xray; проксируйте только n8n по сети 'proxy'.
 EOF
