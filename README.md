@@ -29,5 +29,5 @@ bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/d
 ```
 install xray
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/xray/install-xray.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/xray/install-xray.sh) --vless-url 'vless://you vless link'
 ```
