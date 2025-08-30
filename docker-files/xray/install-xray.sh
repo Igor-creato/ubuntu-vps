@@ -1,161 +1,279 @@
 #!/usr/bin/env bash
-# install-xray.sh — VLESS TCP + Reality в Docker Compose (~/xray)
-# Пример: vless://UUID@HOST:PORT?type=tcp&security=reality&pbk=...&fp=chrome&sni=...&sid=...&spx=%2F&flow=xtls-rprx-vision
+# install-xray.sh
+# Разворачивает Xray (VLESS TCP + Reality) в Docker Compose в ~/xray.
+# Создаёт/перезаписывает файлы:
+#   - ./xray/config.json
+#   - ./docker-compose.yml
+#   - ./env.example
+#
+# Особенности:
+# - HTTP (3128) и SOCKS5 (1080) доступны только во внешней docker-сети 'proxy' (порты наружу не пробрасываются).
+# - Весь трафик inbounds → vless-out (жёсткая маршрутизация).
+# - Запрашиваются только параметры, нужные для VLESS TCP + Reality.
+#
+# Документация:
+#   Docker/Compose: https://docs.docker.com/
+#   Xray Reality:   https://xtls.github.io/
 
-# Безопасные опции (без -u, чтобы не падать на промежуточных пустых переменных)
-set -eE -o pipefail
-set -o errtrace
-trap 'echo -e "[\e[31mERROR\e[0m] $(date +%F\ %T) На строке $LINENO произошла ошибка. См. вывод выше." >&2' ERR
+set -Eeuo pipefail
 
-# ====== дефолты ======
-XRAY_DIR="${XRAY_DIR:-$HOME/xray}"
-EXT_NET="${EXT_NET:-proxy}"
-SERVICE_NAME="${SERVICE_NAME:-xray-client}"
+########################################
+# Параметры по умолчанию (можно переопределить переменными окружения)
+########################################
+XRAY_DIR="${XRAY_DIR:-$HOME/xray}"          # каталог проекта
+EXT_NET="${EXT_NET:-proxy}"                 # внешняя docker-сеть (уже должна существовать)
+SERVICE_NAME="${SERVICE_NAME:-xray-client}" # имя контейнера
 XRAY_IMAGE="${XRAY_IMAGE:-teddysun/xray:1.8.23}"
-HTTP_PORT="${HTTP_PORT:-3128}"
-SOCKS_PORT="${SOCKS_PORT:-1080}"
 
-# заполняются из ссылки/ввода
-SERVER_HOST="${SERVER_HOST:-}"
-SERVER_PORT="${SERVER_PORT:-}"
-VLESS_UUID="${VLESS_UUID:-}"
-SNI="${SNI:-}"
-REALITY_PBK="${REALITY_PBK:-}"
-REALITY_SHORT_ID="${REALITY_SHORT_ID:-}"
-FINGERPRINT="${FINGERPRINT:-chrome}"
-SPIDERX="${SPIDERX:-/}"
-FLOW="${FLOW:-xtls-rprx-vision}"
+HTTP_PORT="${HTTP_PORT:-3128}"              # внутренний HTTP-прокси порт в контейнере
+SOCKS_PORT="${SOCKS_PORT:-1080}"            # внутренний SOCKS5 порт в контейнере
 
-# ====== утилиты ======
+# Поля VLESS TCP + Reality (будут спрошены)
+SERVER_HOST="${SERVER_HOST:-}"              # хост сервера (без порта!)
+SERVER_PORT="${SERVER_PORT:-}"              # порт сервера
+VLESS_UUID="${VLESS_UUID:-}"                # UUID пользователя
+
+SNI="${SNI:-}"                              # reality serverName (маскировка)
+REALITY_PBK="${REALITY_PBK:-}"              # reality publicKey (pbk)
+REALITY_SHORT_ID="${REALITY_SHORT_ID:-}"    # reality shortId (sid) — можно пусто
+FINGERPRINT="${FINGERPRINT:-chrome}"        # fp (по умолчанию chrome)
+SPIDERX="${SPIDERX:-/}"                     # spx (по умолчанию "/")
+FLOW="${FLOW:-xtls-rprx-vision}"            # flow (по умолчанию xtls-rprx-vision)
+
+########################################
+# Вспомогательные
+########################################
 log()  { echo -e "[\e[34mINFO\e[0m]  $(date +'%F %T')  $*"; }
-warn() { echo -e "[\e[33mWARN\e[0m]  $(date +'%F %T')  $*"; }
 err()  { echo -e "[\e[31mERROR\e[0m] $(date +'%F %T')  $*" >&2; exit 1; }
-backup_if_exists(){ local f="$1"; [[ -f "$f" ]] && cp -f "$f" "$f.bak.$(date +%Y%m%d-%H%M%S)" && log "Бэкап: $f -> $f.bak.*"; }
-ensure_cmd(){ command -v "$1" >/dev/null 2>&1 || err "Не найдена команда '$1'."; }
-validate_uuid(){ [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; }
-validate_port(){ [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1>=1 && 10#$1<=65535 )); }
-validate_host_no_port(){ [[ -n "$1" && "$1" != *:* ]]; }
 
-# Надёжный URL-decode: python3 (если есть) -> awk-фолбэк
-urldecode(){
-  local s="$1"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - <<'PY' "$s"
-import sys, urllib.parse
-print(urllib.parse.unquote(sys.argv[1]))
-PY
-  else
-    printf '%s' "$s" | awk '{
-      out=""; i=1; n=length($0);
-      while(i<=n){
-        c=substr($0,i,1);
-        if(c=="%"){
-          if(i+2<=n){
-            h=substr($0,i+1,2);
-            if(h ~ /^[0-9A-Fa-f]{2}$/){ printf "%c", strtonum("0x"h); i+=3; continue }
-          }
-          out=out c; i++; continue
-        }
-        if(c=="+") c=" ";
-        out=out c; i++
-      }
-      print out
-    }'
+backup_if_exists() {
+  local f="$1"
+  if [[ -f "$f" ]]; then
+    cp -f "$f" "$f.bak.$(date +%Y%m%d-%H%M%S)"
+    log "Бэкап: $f -> $f.bak.*"
   fi
 }
 
-parse_vless_url(){
-  local url="$1"
-  [[ "$url" == vless://* ]] || err "Ссылка должна начинаться с vless://"
+ensure_cmd() { command -v "$1" >/dev/null 2>&1 || err "Не найдена команда '$1'."; }
 
-  local rest="${url#vless://}"            # UUID@host:port?query#tag
-  local uuid="${rest%%@*}"
-  local after_at="${rest#*@}"
-  [[ "$after_at" == "$rest" ]] && err "Некорректная ссылка: отсутствует '@'"
+validate_uuid() {
+  [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
 
-  local hostport="${after_at%%\?*}"       # до ?
-  local host="${hostport%%:*}"
-  local port="${hostport##*:}"
+validate_port() {
+  [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
 
-  local query="${after_at#*\?}"; query="${query%%#*}"
+validate_host_no_port() {
+  # запрещаем двоеточие (порт) — нужно только имя/домен/IPv4/IPv6 без []
+  [[ "$1" != *:* ]]
+}
 
-  local type="" security="" pbk="" fp="" sni="" sid="" spx="" flow=""
-  if [[ -n "$query" && "$query" != "$after_at" ]]; then
-    IFS='&' read -r -a _pairs <<< "$query"
-    for pair in "${_pairs[@]}"; do
-      [[ -z "$pair" ]] && continue
-      local k="${pair%%=*}" v=""; [[ "$pair" == *"="* ]] && v="${pair#*=}"
-      v="$(urldecode "$v")"
-      case "$k" in
-        type) type="$v" ;; security) security="$v" ;;
-        pbk) pbk="$v" ;; fp) fp="$v" ;;
-        sni) sni="$v" ;; sid) sid="$v" ;;
-        spx) spx="$v" ;; flow) flow="$v" ;;
-      esac
+# URL-decode для значений query (?a=b&spx=%2F ...)
+urldecode() {
+  local data="${1//+/ }"
+  printf '%b' "${data//%/\\x}"
+}
+
+# Получить значение параметра key из QUERY-строки (без '?'), без декодирования
+qget() {
+  local key="$1" q="$2"
+  printf '%s\n' "$q" | tr '&' '\n' | sed -n "s/^${key}=//p" | head -n1
+}
+
+########################################
+# Проверки окружения
+########################################
+ensure_cmd docker
+docker compose version >/dev/null 2>&1 || err "'docker compose' недоступен. Установите Docker Compose."
+docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена. Создайте:  docker network create $EXT_NET"
+
+########################################
+# НОВОЕ: Ввод VLESS URL (опционально). Если введён — парсим и отключаем ручной ввод.
+########################################
+DO_INTERACTIVE=1
+read -rp "Вставьте VLESS URL (Enter — ручной ввод): " VLESS_URL || true
+if [[ -n "${VLESS_URL}" ]]; then
+  # Пример: vless://<UUID>@host:port?type=tcp&security=reality&pbk=...&fp=chrome&sni=...&sid=...&spx=%2F&flow=...#TAG
+  if [[ ! "$VLESS_URL" =~ ^vless:// ]]; then
+    err "Неверная схема ссылки. Ожидается vless://"
+  fi
+
+  local_noscheme="${VLESS_URL#vless://}"
+
+  # userinfo@rest
+  local_userinfo="${local_noscheme%%@*}"
+  local_rest="${local_noscheme#*@}"
+
+  # UUID
+  VLESS_UUID="$local_userinfo"
+
+  # rest -> hostport[?query][#frag]
+  local_hostport_qfrag="$local_rest"
+  local_hostport="${local_hostport_qfrag%%\?*}"
+  local_qfrag="${local_hostport_qfrag#*\?}"
+  local_query="$local_qfrag"
+  if [[ "$local_hostport_qfrag" == "$local_hostport" ]]; then
+    # нет '?', значит нет query
+    local_query=""
+  else
+    # отрежем фрагмент #...
+    local_query="${local_query%%\#*}"
+  fi
+
+  # Разбор host и port (IPv6 может быть в [])
+  if [[ "$local_hostport" =~ ^\[(.+)\]:([0-9]{1,5})$ ]]; then
+    SERVER_HOST="${BASH_REMATCH[1]}"
+    SERVER_PORT="${BASH_REMATCH[2]}"
+  else
+    SERVER_HOST="${local_hostport%:*}"
+    SERVER_PORT="${local_hostport##*:}"
+  fi
+
+  # Параметры из query
+  local_type="$(qget type "$local_query")"
+  local_sec="$(qget security "$local_query")"
+  local_pbk="$(qget pbk "$local_query")"
+  local_fp="$(qget fp "$local_query")"
+  local_sni="$(qget sni "$local_query")"
+  local_sid="$(qget sid "$local_query")"
+  local_spx="$(qget spx "$local_query")"
+  local_flow="$(qget flow "$local_query")"
+
+  # Присваиваем (с декодированием где нужно)
+  [[ -n "$local_pbk" ]] && REALITY_PBK="$local_pbk"
+  [[ -n "$local_fp"  ]] && FINGERPRINT="$local_fp"
+  [[ -n "$local_sni" ]] && SNI="$(urldecode "$local_sni")"
+  [[ -n "$local_sid" ]] && REALITY_SHORT_ID="$(urldecode "$local_sid")"
+  if [[ -n "$local_spx" ]]; then
+    SPIDERX="$(urldecode "$local_spx")"
+  fi
+  [[ -n "$local_flow" ]] && FLOW="$local_flow"
+
+  # Лёгкая валидация
+  validate_uuid "$VLESS_UUID" || err "UUID из ссылки некорректен."
+  validate_port "$SERVER_PORT" || err "Порт из ссылки некорректен."
+  [[ -n "$SERVER_HOST" ]] || err "Хост в ссылке пустой."
+  [[ "${local_sec:-}" == "reality" ]] || log "Предупреждение: security='${local_sec:-}' (ожидалось 'reality')."
+  [[ "${local_type:-}" == "tcp" ]] || log "Предупреждение: type='${local_type:-}' (ожидалось 'tcp')."
+
+  DO_INTERACTIVE=0
+  log "Параметры успешно получены из VLESS URL. Ручной ввод пропущен."
+fi
+
+########################################
+# Интерактивные вопросы (минимально необходимое)
+########################################
+if (( DO_INTERACTIVE )); then
+  # Host
+  if [[ -z "$SERVER_HOST" ]]; then
+    read -rp "1) SERVER_HOST (домен/IP сервера, БЕЗ порта): " SERVER_HOST
+    while ! validate_host_no_port "$SERVER_HOST" || [[ -z "$SERVER_HOST" ]]; do
+      echo "   Неверно. Укажите домен/IP БЕЗ :порт"
+      read -rp "   SERVER_HOST: " SERVER_HOST
     done
   fi
 
-  VLESS_UUID="$uuid"; SERVER_HOST="$host"; SERVER_PORT="$port"
-  [[ -n "$fp" ]]  && FINGERPRINT="$fp"
-  [[ -n "$sni" ]] && SNI="$sni"
-  [[ -n "$pbk" ]] && REALITY_PBK="$pbk"
-  [[ -n "$sid" ]] && REALITY_SHORT_ID="$sid"
-  [[ -n "$spx" ]] && SPIDERX="$spx"
-  [[ -n "$flow" ]]&& FLOW="$flow"
+  # Port
+  if [[ -z "$SERVER_PORT" ]]; then
+    read -rp "2) SERVER_PORT: " SERVER_PORT
+    while ! validate_port "$SERVER_PORT"; do
+      echo "   Порт должен быть от 1 до 65535."
+      read -rp "   SERVER_PORT: " SERVER_PORT
+    done
+  fi
 
-  validate_uuid "$VLESS_UUID"          || err "UUID неверного формата: $VLESS_UUID"
-  validate_host_no_port "$SERVER_HOST" || err "HOST должен быть без порта: $SERVER_HOST"
-  validate_port "$SERVER_PORT"         || err "PORT некорректен: $SERVER_PORT"
-  [[ -n "$SNI" ]]         || err "В ссылке не указан sni="
-  [[ -n "$REALITY_PBK" ]] || err "В ссылке не указан pbk="
+  # UUID
+  if [[ -z "$VLESS_UUID" ]]; then
+    read -rp "3) VLESS UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): " VLESS_UUID
+    until validate_uuid "$VLESS_UUID"; do
+      echo "   Неверный формат UUID."
+      read -rp "   Повторите UUID: " VLESS_UUID
+    done
+  fi
 
-  [[ "${type:-tcp}" == "tcp" ]] || warn "type=${type:-<пусто>} (скрипт рассчитан на TCP)"
-  [[ "${security:-reality}" == "reality" ]] || warn "security=${security:-<пусто>} (скрипт рассчитан на Reality)"
-}
+  # Reality: SNI
+  if [[ -z "$SNI" ]]; then
+    read -rp "4) Reality SNI/ServerName (напр. creativecommons.org): " SNI
+    while [[ -z "$SNI" ]]; do
+      read -rp "   Введите SNI: " SNI
+    done
+  fi
 
-# ====== проверки окружения (только наличие docker/compose, сеть проверим позже) ======
-ensure_cmd docker
-docker compose version >/dev/null 2>&1 || err "'docker compose' недоступен."
+  # Reality: pbk
+  if [[ -z "$REALITY_PBK" ]]; then
+    read -rp "5) Reality publicKey (pbk=): " REALITY_PBK
+    while [[ -з "$REALITY_PBK" ]]; do
+      read -rp "   Введите publicKey: " REALITY_PBK
+    done
+  fi
 
-# ====== ввод ссылки или ручной ввод ======
-read -rp "Вставьте VLESS URL (Enter — ручной ввод): " VLESS_URL || true
-if [[ -n "${VLESS_URL:-}" ]]; then
-  parse_vless_url "$VLESS_URL"
-else
-  read -rp "SERVER_HOST (без порта): " SERVER_HOST
-  until validate_host_no_port "$SERVER_HOST"; do read -rp "   SERVER_HOST: " SERVER_HOST; done
+  # Reality: sid (можно пусто)
+  if [[ -з "$REALITY_SHORT_ID" ]]; then
+    read -rp "6) Reality shortId (sid=) [можно пусто]: " REALITY_SHORT_ID || true
+  fi
 
-  read -rp "SERVER_PORT: " SERVER_PORT
-  until validate_port "$SERVER_PORT"; do read -rp "   SERVER_PORT: " SERVER_PORT; done
+  # Fingerprint (по умолчанию chrome)
+  read -rp "7) Fingerprint [${FINGERPRINT}]: " _fp || true
+  FINGERPRINT="${_fp:-$FINGERPRINT}"
 
-  read -rp "VLESS UUID: " VLESS_UUID
-  until validate_uuid "$VLESS_UUID"; do read -rp "   UUID: " VLESS_UUID; done
+  # spiderX (по умолчанию /)
+  read -rp "8) spiderX (spx=) [${SPIDERX}]: " _spx || true
+  SPIDERX="${_spx:-$SPIDERX}"
 
-  read -rp "SNI (напр. creativecommons.org): " SNI
-  while [[ -z "$SNI" ]]; do read -rp "   SNI: " SNI; end; done 2>/dev/null || while [[ -z "$SNI" ]]; do read -rp "   SNI: " SNI; done
-
-  read -rp "Reality publicKey (pbk): " REALITY_PBK
-  while [[ -z "$REALITY_PBK" ]]; do read -rp "   pbk: " REALITY_PBK; done
-
-  read -rp "Reality shortId (sid) [пусто]: " REALITY_SHORT_ID || true
-  read -rp "Fingerprint [${FINGERPRINT}]: " _fp || true; FINGERPRINT="${_fp:-$FINGERPRINT}"
-  read -rp "spiderX (spx) [${SPIDERX}]: " _spx || true; SPIDERX="${_spx:-$SPIDERX}"
-  read -rp "flow [${FLOW}]: " _flow || true; FLOW="${_flow:-$FLOW}"
+  # flow (по умолчанию xtls-rprx-vision)
+  read -rp "9) flow [${FLOW}] (напр. xtls-rprx-vision, пусто = не использовать): " _flow || true
+  FLOW="${_flow:-$FLOW}"
 fi
 
-# ====== лог параметров и каталоги ======
-log "Параметры: host=${SERVER_HOST} port=${SERVER_PORT} uuid=${VLESS_UUID}"
-log "Reality: sni=${SNI} pbk=${REALITY_PBK} sid=${REALITY_SHORT_ID:-<пусто>} fp=${FINGERPRINT} spx=${SPIDERX} flow=${FLOW:-<пусто>}"
+########################################
+# Каталоги
+########################################
 log "Каталоги: ${XRAY_DIR}/xray и ${XRAY_DIR}/logs"
 mkdir -p "${XRAY_DIR}/xray" "${XRAY_DIR}/logs"
 
-# ====== config.json ======
+########################################
+# env.example (для повтора)
+########################################
+backup_if_exists "${XRAY_DIR}/env.example"
+cat > "${XRAY_DIR}/env.example" <<ENV
+# Базовые
+XRAY_DIR=${XRAY_DIR}
+EXT_NET=${EXT_NET}
+SERVICE_NAME=${SERVICE_NAME}
+XRAY_IMAGE=${XRAY_IMAGE}
+HTTP_PORT=${HTTP_PORT}
+SOCKS_PORT=${SOCKS_PORT}
+
+# VLESS TCP + Reality
+SERVER_HOST=${SERVER_HOST}
+SERVER_PORT=${SERVER_PORT}
+VLESS_UUID=${VLESS_UUID}
+
+SNI=${SNI}
+REALITY_PBK=${REALITY_PBK}
+REALITY_SHORT_ID=${REALITY_SHORT_ID}
+FINGERPRINT=${FINGERPRINT}
+SPIDERX=${SPIDERX}
+FLOW=${FLOW}
+ENV
+log "Создан: ${XRAY_DIR}/env.example"
+
+########################################
+# Генерация xray/config.json (только VLESS TCP + Reality)
+########################################
 backup_if_exists "${XRAY_DIR}/xray/config.json"
+
+# Блок пользователя с опциональным flow
 USER_JSON="\"id\": \"${VLESS_UUID}\", \"encryption\": \"none\""
-[[ -n "${FLOW}" ]] && USER_JSON="${USER_JSON}, \"flow\": \"${FLOW}\""
+if [[ -n "$FLOW" ]]; then
+  USER_JSON="${USER_JSON}, \"flow\": \"${FLOW}\""
+fi
+
+# Опциональный shortId
 SHORTID_JSON=""
-if [[ -n "${REALITY_SHORT_ID}" ]]; then
-  printf -v SHORTID_JSON ',\n          "shortId": "%s"' "${REALITY_SHORT_ID}"
+if [[ -n "$REALITY_SHORT_ID" ]]; then
+  SHORTID_JSON=$',\n          "shortId": "'"$REALITY_SHORT_ID"'"'
 fi
 
 cat > "${XRAY_DIR}/xray/config.json" <<JSON
@@ -178,7 +296,9 @@ cat > "${XRAY_DIR}/xray/config.json" <<JSON
           {
             "address": "${SERVER_HOST}",
             "port": ${SERVER_PORT},
-            "users": [ { ${USER_JSON} } ]
+            "users": [
+              { ${USER_JSON} }
+            ]
           }
         ]
       },
@@ -198,17 +318,18 @@ cat > "${XRAY_DIR}/xray/config.json" <<JSON
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-      { "type": "field", "inboundTag": ["http-in","socks-in"], "outboundTag": "vless-out" }
+      { "type": "field", "inboundTag": ["http-in", "socks-in"], "outboundTag": "vless-out" }
     ]
   }
 }
 JSON
 log "Создан: ${XRAY_DIR}/xray/config.json"
 
-# ====== docker-compose.yml ======
+########################################
+# docker-compose.yml
+########################################
 backup_if_exists "${XRAY_DIR}/docker-compose.yml"
 cat > "${XRAY_DIR}/docker-compose.yml" <<YAML
-version: "3.9"
 services:
   ${SERVICE_NAME}:
     image: ${XRAY_IMAGE}
@@ -219,49 +340,43 @@ services:
       - ./logs:/var/log/xray
     networks:
       - ${EXT_NET}
+    # Порты наружу НЕ публикуем: доступ к 3128/1080 только из сети '${EXT_NET}'
     healthcheck:
       test: ["CMD", "/usr/bin/xray", "-version"]
       interval: 30s
       timeout: 5s
       retries: 5
+
 networks:
   ${EXT_NET}:
     external: true
 YAML
 log "Создан: ${XRAY_DIR}/docker-compose.yml"
 
-# ====== теперь проверяем сеть И запускаем ======
-if ! docker network inspect "$EXT_NET" >/dev/null 2>&1; then
-  err "Внешняя сеть '$EXT_NET' не найдена. Создай её отдельно и запусти:
-    docker network create $EXT_NET
-    docker compose -f ${XRAY_DIR}/docker-compose.yml up -d"
-fi
-
+########################################
+# Запуск
+########################################
 log "Запуск docker compose в: ${XRAY_DIR}"
 pushd "${XRAY_DIR}" >/dev/null
+docker compose pull
 docker compose up -d
 popd >/dev/null
 
-# ====== мягкие самотесты (не мешают запуску) ======
 log "Проверка сетей контейнера '${SERVICE_NAME}':"
 docker inspect "${SERVICE_NAME}" --format '{{json .NetworkSettings.Networks}}' || true
 
-log "Проверка HTTP-прокси через контейнер curl..."
-if docker run --rm --network "${EXT_NET}" curlimages/curl:8.11.1 \
-  -sS -x "http://${SERVICE_NAME}:${HTTP_PORT}" https://api.ipify.org >/tmp/xray_ip_http; then
-  HTTP_IP=$(cat /tmp/xray_ip_http); rm -f /tmp/xray_ip_http
-  log "HTTP-прокси внешний IP: ${HTTP_IP}"
-else
-  warn "HTTP-прокси тест не прошёл — проверь VLESS URL/sni/pbk/sid/fp/spx/flow."
-fi
+cat <<EOF
 
-log "Проверка SOCKS5-прокси через контейнер curl..."
-if docker run --rm --network "${EXT_NET}" curlimages/curl:8.11.1 \
-  -sS --socks5-hostname "${SERVICE_NAME}:${SOCKS_PORT}" https://api.ipify.org >/tmp/xray_ip_socks; then
-  SOCKS_IP=$(cat /tmp/xray_ip_socks); rm -f /tmp/xray_ip_socks
-  log "SOCKS5-прокси внешний IP: ${SOCKS_IP}"
-else
-  warn "SOCKS5-прокси тест не прошёл."
-fi
+Готово ✅
 
-log "Готово ✅"
+Проверка из внешней docker-сети:
+  docker run --rm --network ${EXT_NET} curlimages/curl:8.11.1 \\
+    -sS -x http://${SERVICE_NAME}:3128 https://api.ipify.org; echo
+
+Логи Xray:
+  docker compose -f ${XRAY_DIR}/docker-compose.yml logs --tail=100 ${SERVICE_NAME}
+  docker compose -f ${XRAY_DIR}/docker-compose.yml exec ${SERVICE_NAME} sh -lc 'tail -n 50 /var/log/xray/access.log; echo; tail -n 50 /var/log/xray/error.log'
+
+Подсказки:
+- Прокси в контейнерах: HTTP -> http://${SERVICE_NAME}:3128 , SOCKS5 -> socks5h://${SERVICE_NAME}:1080
+- Если не работает HTTPS через прокси — проверьте SNI/pbk/shortId/fingerprint/spiderX и соответствие
