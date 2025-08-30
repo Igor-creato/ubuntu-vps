@@ -77,7 +77,6 @@ services:
       DB_POSTGRESDB_SCHEMA: public
 
       # --- URL/прокси за Traefik
-      N8N_HOST: ${N8N_HOST}
       N8N_PORT: 5678
       N8N_PROTOCOL: https
       N8N_EDITOR_BASE_URL: https://${N8N_HOST}
