@@ -111,7 +111,7 @@ validate_uuid() {
 }
 
 ########################################
-# Аргументы (исправлено: esac, без лишних конструкций)
+# Аргументы
 ########################################
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -200,11 +200,11 @@ fi
 if [[ "$SECURITY" == "reality" ]]; then
   if [[ -z "$SNI" ]]; then
     read -rp "7) Reality SNI/ServerName (маскировка) [например creativecommons.org]: " SNI
-    while [[ -з "$SNI" ]]; do read -rp "   Введи SNI: " SNI; done
+    while [[ -z "$SNI" ]]; do read -rp "   Введи SNI: " SNI; done
   fi
-  if [[ -з "$REALITY_PBK" ]]; then
+  if [[ -z "$REALITY_PBK" ]]; then
     read -rp "8) Reality publicKey (pbk=): " REALITY_PBK
-    while [[ -з "$REALITY_PBK" ]]; do read -rp "   Введи publicKey: " REALITY_PBK; done
+    while [[ -z "$REALITY_PBK" ]]; do read -rp "   Введи publicKey: " REALITY_PBK; done
   fi
   if [[ -z "$REALITY_SHORT_ID" ]]; then
     read -rp "9) Reality shortId (sid=) [можно пусто]: " REALITY_SHORT_ID || true
@@ -265,7 +265,15 @@ log "Создан: ${XRAY_DIR}/env.example"
 # streamSettings
 ########################################
 STREAM_SETTINGS=""
+
 if [[ "$SECURITY" == "reality" ]]; then
+  # Опциональный фрагмент для spiderX
+  SPIDERX_JSON=""
+  if [[ -n "$SPIDERX" ]]; then
+    SPIDERX_JSON=$',\n  "spiderX": "'"$SPIDERX"'"'
+  fi
+
+  # Формируем блок без лишних скобок
   STREAM_SETTINGS=$(cat <<JSON
 "network": "tcp",
 "security": "reality",
@@ -274,8 +282,7 @@ if [[ "$SECURITY" == "reality" ]]; then
   "fingerprint": "$FINGERPRINT",
   "show": false,
   "publicKey": "$REALITY_PBK",
-  "shortId": "$REALITY_SHORT_ID"${SPIDERX:+,
-  "spiderX": "$SPIDERX"}
+  "shortId": "$REALITY_SHORT_ID"$SPIDERX_JSON
 }
 JSON
 )
