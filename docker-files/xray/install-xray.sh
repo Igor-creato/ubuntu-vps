@@ -1,21 +1,14 @@
 #!/usr/bin/env bash
 # install-xray.sh
 # Разворачивает Xray (VLESS TCP + Reality) в Docker Compose в ~/xray.
-# Теперь умеет разбирать VLESS-ссылку: --vless-url 'vless://...'
+# Скрипт сначала предложит вставить VLESS-ссылку вида:
+#   vless://UUID@HOST:PORT?type=tcp&security=reality&pbk=...&fp=...&sni=...&sid=...&spx=...&flow=...
+# Если оставить строку пустой — перейдёт к ручному вводу параметров.
 #
 # Создаёт/перезаписывает:
 #   - ~/xray/xray/config.json
 #   - ~/xray/docker-compose.yml
 #   - ~/xray/env.example
-#
-# Поддерживаемые флаги/ENV:
-#   --vless-url 'vless://...'      # разбор всех параметров из ссылки
-#   --image NAME:TAG               # версия образа (по умолчанию teddysun/xray:1.8.23)
-#   --dir PATH                     # куда ставить (по умолчанию ~/xray)
-#   --net proxy                    # внешняя docker-сеть
-#   --service xray-client          # имя контейнера
-#
-# Также можно задать ENV переменные: XRAY_DIR, EXT_NET, SERVICE_NAME, XRAY_IMAGE
 #
 # Документация:
 #   Docker/Compose: https://docs.docker.com/
@@ -45,37 +38,6 @@ FINGERPRINT="${FINGERPRINT:-chrome}"        # по умолчанию
 SPIDERX="${SPIDERX:-/}"                     # по умолчанию
 FLOW="${FLOW:-xtls-rprx-vision}"            # по умолчанию
 
-VLESS_URL="${VLESS_URL:-}"
-
-########################################
-# Парсер аргументов
-########################################
-usage() {
-  cat <<'USAGE'
-Использование: ./install-xray.sh [опции]
-
-Опции:
-  --vless-url "vless://UUID@HOST:PORT?type=tcp&security=reality&pbk=...&fp=...&sni=...&sid=...&spx=...&flow=..."
-  --image NAME:TAG           Образ Xray (по умолчанию: teddysun/xray:1.8.23)
-  --dir PATH                 Каталог установки (по умолчанию: ~/xray)
-  --net NAME                 Внешняя docker-сеть (по умолчанию: proxy)
-  --service NAME             Имя контейнера/сервиса (по умолчанию: xray-client)
-  -h, --help                 Показать помощь
-USAGE
-}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --vless-url) VLESS_URL="$2"; shift 2 ;;
-    --image) XRAY_IMAGE="$2"; shift 2 ;;
-    --dir) XRAY_DIR="$2"; shift 2 ;;
-    --net) EXT_NET="$2"; shift 2 ;;
-    --service) SERVICE_NAME="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Неизвестный аргумент: $1"; usage; exit 1 ;;
-  esac
-done
-
 ########################################
 # Утилиты
 ########################################
@@ -96,7 +58,6 @@ validate_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
 validate_host_no_port() { [[ "$1" != *:* ]]; }
 
 urldecode() {
-  # URL-decode без внешних зависимостей
   local data="${1//+/ }"
   printf '%b' "${data//%/\\x}"
 }
@@ -106,7 +67,7 @@ parse_vless_url() {
   [[ "$url" == vless://* ]] || err "Ссылка должна начинаться с vless://"
 
   local rest="${url#vless://}"              # UUID@host:port?query#tag
-  local uuid="${rest%%@*}"                  # до @
+  local uuid="${rest%%@*}"
   local after_at="${rest#*@}"
 
   local hostport="${after_at%%\?*}"         # до ?
@@ -116,7 +77,6 @@ parse_vless_url() {
   local query="${after_at#*\?}"             # после ?
   query="${query%%#*}"                      # до #
 
-  # разобрать query
   declare -A q; local kv k v
   IFS='&' read -r -a kv <<< "$query"
   for pair in "${kv[@]:-}"; do
@@ -126,15 +86,18 @@ parse_vless_url() {
     [[ -n "$k" ]] && q["$k"]="$v"
   done
 
-  # валидация и присваивание
   VLESS_UUID="$uuid"
   SERVER_HOST="$host"
   SERVER_PORT="$port"
 
   local type="${q[type]:-}"
   local security="${q[security]:-}"
-  [[ "$type" == "tcp" ]] || warn_msg+="[WARN] type != tcp (type=${type}) — скрипт рассчитан на TCP.\n"
-  [[ "$security" == "reality" ]] || warn_msg+="[WARN] security != reality (security=${security}) — скрипт рассчитан на Reality.\n"
+  if [[ "$type" != "tcp" ]]; then
+    echo "[WARN] type=${type:-<пусто>} — скрипт рассчитан на TCP." >&2
+  fi
+  if [[ "$security" != "reality" ]]; then
+    echo "[WARN] security=${security:-<пусто>} — скрипт рассчитан на Reality." >&2
+  fi
 
   REALITY_PBK="${q[pbk]:-}"
   FINGERPRINT="${q[fp]:-chrome}"
@@ -143,17 +106,11 @@ parse_vless_url() {
   SPIDERX="${q[spx]:-"/"}"
   FLOW="${q[flow]:-xtls-rprx-vision}"
 
-  # sanity checks
   validate_uuid "$VLESS_UUID" || err "UUID в ссылке неверного формата: $VLESS_UUID"
   validate_host_no_port "$SERVER_HOST" || err "Хост в ссылке содержит порт/скобки: $SERVER_HOST"
   validate_port "$SERVER_PORT" || err "Порт в ссылке некорректен: $SERVER_PORT"
   [[ -n "$SNI" ]] || err "В ссылке не указан sni= (обязательно для Reality)"
-  [[ -n "$REALITY_PBK" ]] || err "В ссылке не указан pbk= (publicKey обязательно для Reality)"
-
-  # вывести предупреждения, если есть
-  if [[ -n "${warn_msg:-}" ]]; then
-    echo -e "$warn_msg" >&2
-  fi
+  [[ -n "$REALITY_PBK" ]] || err "В ссылке не указан pbk= (publicKey обязателен)"
 }
 
 ########################################
@@ -164,9 +121,10 @@ docker compose version >/dev/null 2>&1 || err "'docker compose' недоступ
 docker network inspect "$EXT_NET" >/dev/null 2>&1 || err "Внешняя сеть '$EXT_NET' не найдена. Создайте:  docker network create $EXT_NET"
 
 ########################################
-# Разбор ссылки (если передана) или интерактив
+# Вставьте ссылку или Enter для ручного ввода
 ########################################
-if [[ -n "$VLESS_URL" ]]; then
+read -rp "Вставьте VLESS URL (Enter — вводить параметры вручную): " VLESS_URL || true
+if [[ -n "${VLESS_URL:-}" ]]; then
   parse_vless_url "$VLESS_URL"
 else
   # Минимальный интерактив
@@ -291,7 +249,6 @@ log "Создан: ${XRAY_DIR}/xray/config.json"
 ########################################
 backup_if_exists "${XRAY_DIR}/docker-compose.yml"
 cat > "${XRAY_DIR}/docker-compose.yml" <<YAML
-version: "3.9"
 
 services:
   ${SERVICE_NAME}:
