@@ -133,6 +133,10 @@ networks:
   proxy:
     external: true
     name: proxy
+  vpn:                 
+    external: true
+    name: vpn
+
 
 volumes:
   postgres_data:
