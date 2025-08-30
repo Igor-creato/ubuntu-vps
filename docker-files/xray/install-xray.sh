@@ -291,8 +291,8 @@ fi
 cat > "${XRAY_DIR}/config.json" <<JSON
 {
   "log": {
-    "access": "/var/log/xray/access.log",
-    "error": "/var/log/xray/error.log",
+    "access": "/dev/stdout",
+    "error": "/dev/stderr",
     "loglevel": "info"
   },
   "inbounds": [
@@ -351,7 +351,7 @@ services:
       - TZ=Europe/Amsterdam
     volumes:
       - ./config.json:/etc/xray/config.json:ro
-      - ./logs:/var/log/xray
+    # - ./logs:/var/log/xray
     command: ["run", "-c", "/etc/xray/config.json"]
     networks:
       - ${EXT_NET}
