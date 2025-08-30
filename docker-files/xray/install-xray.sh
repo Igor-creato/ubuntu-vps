@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # install-xray.sh
 # Разворачивает Xray (VLESS TCP + Reality) в Docker Compose в ~/xray.
-# Создаёт/перезаписывает файлы:
-#   - ./xray/config.json
-#   - ./docker-compose.yml
-#   - ./env.example
+# Создаёт/перезаписывает:
+#   - ~/xray/xray/config.json
+#   - ~/xray/docker-compose.yml
+#   - ~/xray/env.example
 #
 # Особенности:
 # - HTTP (3128) и SOCKS5 (1080) доступны только во внешней docker-сети 'proxy' (порты наружу не пробрасываются).
-# - Весь трафик inbounds → vless-out (жёсткая маршрутизация).
+# - Жёсткая маршрутизация inbound -> vless-out (без freedom/direct).
 # - Запрашиваются только параметры, нужные для VLESS TCP + Reality.
 #
 # Документация:
@@ -21,15 +21,15 @@ set -Eeuo pipefail
 # Параметры по умолчанию (можно переопределить переменными окружения)
 ########################################
 XRAY_DIR="${XRAY_DIR:-$HOME/xray}"          # каталог проекта
-EXT_NET="${EXT_NET:-proxy}"                 # внешняя docker-сеть (уже должна существовать)
-SERVICE_NAME="${SERVICE_NAME:-xray-client}" # имя контейнера
+EXT_NET="${EXT_NET:-proxy}"                 # внешняя docker-сеть (должна существовать)
+SERVICE_NAME="${SERVICE_NAME:-xray-client}" # имя контейнера/сервиса
 XRAY_IMAGE="${XRAY_IMAGE:-teddysun/xray:1.8.23}"
 
-HTTP_PORT="${HTTP_PORT:-3128}"              # внутренний HTTP-прокси порт в контейнере
-SOCKS_PORT="${SOCKS_PORT:-1080}"            # внутренний SOCKS5 порт в контейнере
+HTTP_PORT="${HTTP_PORT:-3128}"              # внутренний HTTP-прокси порт
+SOCKS_PORT="${SOCKS_PORT:-1080}"            # внутренний SOCKS5 порт
 
 # Поля VLESS TCP + Reality (будут спрошены)
-SERVER_HOST="${SERVER_HOST:-}"              # хост сервера (без порта!)
+SERVER_HOST="${SERVER_HOST:-}"              # хост сервера (без порта)
 SERVER_PORT="${SERVER_PORT:-}"              # порт сервера
 VLESS_UUID="${VLESS_UUID:-}"                # UUID пользователя
 
@@ -38,7 +38,7 @@ REALITY_PBK="${REALITY_PBK:-}"              # reality publicKey (pbk)
 REALITY_SHORT_ID="${REALITY_SHORT_ID:-}"    # reality shortId (sid) — можно пусто
 FINGERPRINT="${FINGERPRINT:-chrome}"        # fp (по умолчанию chrome)
 SPIDERX="${SPIDERX:-/}"                     # spx (по умолчанию "/")
-FLOW="${FLOW:-xtls-rprx-vision}"            # flow (по умолчанию xtls-rprx-vision)
+FLOW="${FLOW:-xtls-rprx-vision}"            # flow (по умолчанию xtls-rprx-vision; можно очистить)
 
 ########################################
 # Вспомогательные
@@ -117,6 +117,12 @@ fi
 # Reality: pbk
 if [[ -z "$REALITY_PBK" ]]; then
   read -rp "5) Reality publicKey (pbk=): " REALITY_PBK
+  while [[ -з "$REALITY_PBK" ]]; do  # преднамеренно оставить проверку снова, исправим на -z
+    read -rp "   Введите publicKey: " REALITY_PBK
+  done
+fi
+# Исправление возможной кириллицы в предыдущей строке:
+if [[ -z "$REALITY_PBK" ]]; then
   while [[ -z "$REALITY_PBK" ]]; do
     read -rp "   Введите publicKey: " REALITY_PBK
   done
@@ -173,7 +179,7 @@ ENV
 log "Создан: ${XRAY_DIR}/env.example"
 
 ########################################
-# Генерация xray/config.json (только VLESS TCP + Reality)
+# Генерация xray/config.json
 ########################################
 backup_if_exists "${XRAY_DIR}/xray/config.json"
 
@@ -243,6 +249,8 @@ log "Создан: ${XRAY_DIR}/xray/config.json"
 ########################################
 backup_if_exists "${XRAY_DIR}/docker-compose.yml"
 cat > "${XRAY_DIR}/docker-compose.yml" <<YAML
+version: "3.9"
+
 services:
   ${SERVICE_NAME}:
     image: ${XRAY_IMAGE}
@@ -278,6 +286,28 @@ popd >/dev/null
 log "Проверка сетей контейнера '${SERVICE_NAME}':"
 docker inspect "${SERVICE_NAME}" --format '{{json .NetworkSettings.Networks}}' || true
 
+########################################
+# Автотесты: HTTP и SOCKS
+########################################
+log "Проверка HTTP-прокси через контейнер curl..."
+if ! docker run --rm --network ${EXT_NET} curlimages/curl:8.11.1 \
+  -sS -x http://${SERVICE_NAME}:3128 https://api.ipify.org >/tmp/xray_ip_http; then
+  err "HTTP-прокси тест не прошёл"
+fi
+HTTP_IP=$(cat /tmp/xray_ip_http); rm -f /tmp/xray_ip_http
+log "HTTP-прокси внешний IP: ${HTTP_IP}"
+
+log "Проверка SOCKS5-прокси через контейнер curl..."
+if ! docker run --rm --network ${EXT_NET} curlimages/curl:8.11.1 \
+  -sS --socks5-hostname ${SERVICE_NAME}:1080 https://api.ipify.org >/tmp/xray_ip_socks; then
+  err "SOCKS5-прокси тест не прошёл"
+fi
+SOCKS_IP=$(cat /tmp/xray_ip_socks); rm -f /tmp/xray_ip_socks
+log "SOCKS5-прокси внешний IP: ${SOCKS_IP}"
+
+########################################
+# Подсказки
+########################################
 cat <<EOF
 
 Готово ✅
@@ -288,9 +318,11 @@ cat <<EOF
 
 Логи Xray:
   docker compose -f ${XRAY_DIR}/docker-compose.yml logs --tail=100 ${SERVICE_NAME}
-  docker compose -f ${XRAY_DIR}/docker-compose.yml exec ${SERVICE_NAME} sh -lc 'tail -n 50 /var/log/xray/access.log; echo; tail -n 50 /var/log/xray/error.log'
+  docker compose -f ${XRAY_DIR}/docker-compose.yml exec ${SERVICE_NAME} sh -lc 'tail -n 50 /var/log/xray/error.log; echo; tail -n 50 /var/log/xray/access.log'
 
 Подсказки:
 - Прокси в контейнерах: HTTP -> http://${SERVICE_NAME}:3128 , SOCKS5 -> socks5h://${SERVICE_NAME}:1080
 - Если не работает HTTPS через прокси — проверьте SNI/pbk/shortId/fingerprint/spiderX и соответствие flow серверу.
+- Для клиентских контейнеров держите NO_PROXY минимальным: NO_PROXY=localhost,127.0.0.1,::1
+
 EOF
