@@ -241,8 +241,8 @@ fi
 ########################################
 # Каталоги
 ########################################
-log "Каталоги: ${XRAY_DIR}/xray и ${XRAY_DIR}/logs"
-mkdir -p "${XRAY_DIR}/xray" "${XRAY_DIR}/logs"
+log "Каталоги: ${XRAY_DIR} и ${XRAY_DIR}/logs"
+mkdir -p "${XRAY_DIR}" "${XRAY_DIR}/logs"
 
 ########################################
 # env.example (для повтора)
