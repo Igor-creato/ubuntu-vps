@@ -285,48 +285,43 @@ fi
 # Опциональный shortId
 SHORTID_JSON=""
 if [[ -n "$REALITY_SHORT_ID" ]]; then
-  SHORTID_JSON=$',\n          "shortId": "'"$REALITY_SHORT_ID"'"'
+  SHORTID_JSON=",
+          \"shortId\": \"${REALITY_SHORT_ID}\""
 fi
 
-cat > "${XRAY_DIR}/config.json" <<JSON
+cat > "${XRAY_DIR}/xray/config.json" <<JSON
 {
-  "log": {
-    "access": "/dev/stdout",
-    "error": "/dev/stderr",
-    "loglevel": "info"
-  },
+  "log": { "access": "/dev/stdout", "error": "/dev/stderr", "loglevel": "debug" },
+
   "inbounds": [
     { "tag": "http-in",  "listen": "0.0.0.0", "port": ${HTTP_PORT},  "protocol": "http" },
     { "tag": "socks-in", "listen": "0.0.0.0", "port": ${SOCKS_PORT}, "protocol": "socks", "settings": { "udp": true } }
   ],
+
   "outbounds": [
     {
       "tag": "vless-out",
       "protocol": "vless",
       "settings": {
-        "vnext": [
-          {
-            "address": "${SERVER_HOST}",
-            "port": ${SERVER_PORT},
-            "users": [
-              { ${USER_JSON} }
-            ]
-          }
-        ]
+        "vnext": [{
+          "address": "${SERVER_HOST}",
+          "port": ${SERVER_PORT},
+          "users": [{ ${USER_JSON} }]
+        }]
       },
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
           "serverName": "${SNI}",
-          "fingerprint": "${FINGERPRINT}",
-          "show": false,
           "publicKey": "${REALITY_PBK}"${SHORTID_JSON},
-          "spiderX": "${SPIDERX}"
+          "spiderX": "${SPIDERX}",
+          "fingerprint": "${FINGERPRINT}"
         }
       }
     }
   ],
+
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
@@ -336,6 +331,7 @@ cat > "${XRAY_DIR}/config.json" <<JSON
 }
 JSON
 log "Создан: ${XRAY_DIR}/xray/config.json"
+
 
 ########################################
 # docker-compose.yml
