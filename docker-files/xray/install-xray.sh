@@ -289,7 +289,7 @@ if [[ -n "$REALITY_SHORT_ID" ]]; then
           \"shortId\": \"${REALITY_SHORT_ID}\""
 fi
 
-cat > "${XRAY_DIR}/xray/config.json" <<JSON
+cat > "${XRAY_DIR}/config.json" <<JSON
 {
   "log": { "access": "/dev/stdout", "error": "/dev/stderr", "loglevel": "debug" },
 
