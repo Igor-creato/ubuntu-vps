@@ -19,11 +19,18 @@ install n8n
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/n8n/install-n8n.sh)
 ```
-restart with vpn
+restart n8n with vpn 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d --force-recreate n8n
 ```
-быстрый "bounce" без пересоздания:
+update n8n with vpn
+```bash
+docker compose pull && docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d --force-recreate n8n
+```
+update n8n
+```bash
+docker compose pull && docker compose up -d --force-recreate n8n
+```
 docker compose -f docker-compose.yml -f docker-compose.vpn.yml restart n8n
 
 install supabase
