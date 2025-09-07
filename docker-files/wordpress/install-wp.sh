@@ -5,7 +5,7 @@
 #  - Traefik уже запущен отдельно и использует внешнюю сеть "proxy".
 #  - phpMyAdmin защищён Basic Auth через файл (/auth/.htpasswd) — или через встроенный хеш в label.
 #  - Секреты (MariaDB, WP salts) и удобные поля (логин/пароль BasicAuth) пишутся в ./wp/.env.
-
+cd ~
 set -Eeuo pipefail
 IFS=$'\n\t'
 

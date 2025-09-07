@@ -11,6 +11,7 @@ ENV_FILE="$BASE_DIR/.env"
 SECRETS_DIR="$BASE_DIR/secrets"
 
 # Создаём директории
+cd ~
 mkdir -p "$BASE_DIR"/{secrets,logs}
 
 # Проверяем права на запись

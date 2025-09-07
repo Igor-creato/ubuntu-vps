@@ -14,6 +14,7 @@
 set -Eeuo pipefail
 
 ### ========= Конфиг по умолчанию =========
+cd ~
 PROJECT_DIR="${PWD}/supabase"           # куда сложим compose и .env
 REPO_URL="https://github.com/supabase/supabase.git"
 TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-proxy}"   # внешняя сеть traefik (общая с n8n)
