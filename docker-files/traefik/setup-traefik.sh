@@ -58,7 +58,7 @@ if [[ -z "${ACME_EMAIL:-}" ]] || [[ -z "${TRAEFIK_DOMAIN:-}" ]]; then
 
     # Генерируем учётные данные
     BASIC_AUTH_USER="admin"
-    BASIC_AUTH_PASS=$(openssl rand -base64 16)
+    BASIC_AUTH_PASS=$(openssl rand -base64 18)
     echo -e "${GREEN}Сгенерированный пароль для ${BASIC_AUTH_USER}: ${BASIC_AUTH_PASS}${NC}"
 
     # Перезаписываем .env
