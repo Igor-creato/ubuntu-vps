@@ -25,11 +25,11 @@ docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d --force-rec
 ```
 update n8n with vpn
 ```bash
-docker compose pull && docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d --force-recreate n8n
+docker compose pull && docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
 ```
 update n8n
 ```bash
-docker compose pull && docker compose up -d --force-recreate n8n
+docker compose pull && docker compose up -d 
 ```
 docker compose -f docker-compose.yml -f docker-compose.vpn.yml restart n8n
 
