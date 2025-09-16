@@ -31,8 +31,12 @@ update n8n
 ```bash
 docker compose pull && docker compose up -d 
 ```
+```bash
 docker compose -f docker-compose.yml -f docker-compose.vpn.yml restart n8n
-
+```
+```bash
+docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
+```
 install supabase
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/supabase/install-supabase.sh)
