@@ -49,3 +49,7 @@ install xray
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/xray/install-xray.sh)
 ```
+чистка системы (запускать команду когда все нужные контейнеры работают!!!)
+```bash
+docker system prune -a --volumes -f
+```
