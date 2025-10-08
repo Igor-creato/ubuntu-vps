@@ -51,7 +51,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/d
 ```
 install apache mariadb wordpress
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/xray/install-xray.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/apache-wordpress.sh)
 ```
 чистка системы (запускать команду когда все нужные контейнеры работают!!!)
 ```bash
