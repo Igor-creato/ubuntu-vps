@@ -2,6 +2,7 @@
 
 # Автоматическая установка и настройка веб-сервера на Ubuntu 24.04
 # Включает: Apache, MariaDB, PHP, WordPress, phpMyAdmin, SSL-сертификаты
+# С проверкой DNS перед получением SSL сертификатов
 
 set -e  # Остановить выполнение при ошибке
 
@@ -30,6 +31,20 @@ generate_password() {
     head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9!@#$%^&*' | head -c $length
 }
 
+# Функция проверки DNS
+check_dns() {
+    local domain=$1
+    print_status "Проверка DNS для $domain..."
+    
+    if dig +short $domain | grep -q '^[0-9]'; then
+        print_status "✓ DNS запись для $domain найдена"
+        return 0
+    else
+        print_warning "✗ DNS запись для $domain не найдена"
+        return 1
+    fi
+}
+
 # Проверка прав суперпользователя
 if [ "$EUID" -ne 0 ]; then
     print_error "Пожалуйста, запустите скрипт с правами суперпользователя (sudo)"
@@ -44,7 +59,7 @@ apt update && apt upgrade -y
 
 # Установка необходимых пакетов
 print_status "Установка базовых пакетов..."
-apt install -y software-properties-common curl wget unzip ufw certbot python3-certbot-apache
+apt install -y software-properties-common curl wget unzip ufw certbot python3-certbot-apache dnsutils
 
 # Генерация паролей
 MYSQL_ROOT_PASSWORD=$(generate_password 20)
@@ -144,20 +159,48 @@ a2dissite 000-default.conf
 # Перезапуск Apache
 systemctl reload apache2
 
-# Получение SSL-сертификата Let's Encrypt
-print_status "Получение SSL-сертификата Let's Encrypt..."
-print_warning "ВАЖНО: Убедитесь, что домен $DOMAIN указывает на этот сервер!"
-read -p "Введите email для уведомлений Let's Encrypt: " EMAIL
+# Запрос email для SSL
+read -p "Введите email для уведомлений Let's Encrypt (оставьте пустым для пропуска SSL): " EMAIL
 
-if [ -z "$EMAIL" ]; then
-    print_warning "Email не указан. SSL-сертификат не будет установлен."
-else
-    print_status "Получение SSL-сертификата для $DOMAIN..."
-    certbot --apache -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos --email $EMAIL
+# Получение SSL-сертификата с проверкой DNS
+if [ ! -z "$EMAIL" ]; then
+    print_status "Проверка DNS записей перед получением SSL сертификата..."
     
-    # Настройка автоматического обновления сертификатов
-    systemctl enable certbot.timer
-    systemctl start certbot.timer
+    # Проверяем основной домен
+    if check_dns $DOMAIN; then
+        CERT_DOMAINS="-d $DOMAIN"
+        
+        # Проверяем www поддомен
+        if check_dns "www.$DOMAIN"; then
+            CERT_DOMAINS="$CERT_DOMAINS -d www.$DOMAIN"
+            print_status "Будем получать сертификат для: $DOMAIN и www.$DOMAIN"
+        else
+            print_warning "www.$DOMAIN не найден в DNS. Получаем сертификат только для $DOMAIN"
+            print_warning "Чтобы добавить www позже, настройте DNS и выполните:"
+            print_warning "certbot --apache -d $DOMAIN -d www.$DOMAIN --expand"
+        fi
+        
+        # Получаем сертификат
+        print_status "Получение SSL-сертификата Let's Encrypt..."
+        if certbot --apache $CERT_DOMAINS --non-interactive --agree-tos --email $EMAIL; then
+            print_status "✓ SSL-сертификат успешно получен"
+            
+            # Настройка автоматического обновления сертификатов
+            systemctl enable certbot.timer
+            systemctl start certbot.timer
+            print_status "✓ Автоматическое обновление SSL сертификатов настроено"
+        else
+            print_error "Ошибка получения SSL сертификата"
+            print_warning "Сайт будет работать по HTTP. SSL можно настроить позже."
+        fi
+    else
+        print_error "Основной домен $DOMAIN не найден в DNS!"
+        print_warning "Убедитесь, что A-запись указывает на IP этого сервера: $(curl -s ifconfig.me)"
+        print_warning "SSL сертификат не будет получен. Сайт будет работать по HTTP."
+        print_warning "После настройки DNS выполните: certbot --apache -d $DOMAIN"
+    fi
+else
+    print_warning "Email не указан. SSL-сертификат не будет установлен."
 fi
 
 # Установка WordPress
@@ -217,10 +260,21 @@ EOF
 # Включение поддомена phpMyAdmin
 a2ensite pma.$DOMAIN.conf
 
-# Получение SSL для поддомена phpMyAdmin
+# Получение SSL для поддомена phpMyAdmin с проверкой DNS
 if [ ! -z "$EMAIL" ]; then
-    print_status "Получение SSL-сертификата для pma.$DOMAIN..."
-    certbot --apache -d pma.$DOMAIN --non-interactive --agree-tos --email $EMAIL
+    print_status "Проверка DNS для поддомена phpMyAdmin..."
+    if check_dns "pma.$DOMAIN"; then
+        print_status "Получение SSL-сертификата для pma.$DOMAIN..."
+        if certbot --apache -d pma.$DOMAIN --non-interactive --agree-tos --email $EMAIL; then
+            print_status "✓ SSL-сертификат для phpMyAdmin получен"
+        else
+            print_warning "Ошибка получения SSL для phpMyAdmin. Будет доступен по HTTP."
+        fi
+    else
+        print_warning "DNS запись для pma.$DOMAIN не найдена"
+        print_warning "phpMyAdmin будет доступен по HTTP"
+        print_warning "После настройки DNS выполните: certbot --apache -d pma.$DOMAIN"
+    fi
 fi
 
 # Перезапуск Apache
@@ -246,33 +300,46 @@ systemctl restart apache2
 print_status "Очистка временных файлов..."
 rm -rf /tmp/wordpress /tmp/latest.tar.gz
 
+# Определение протокола для URL
+if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    PROTOCOL="https"
+else
+    PROTOCOL="http"
+fi
+
 # Создание файла с информацией о системе
 print_status "Создание файла с информацией о системе..."
 cat > /root/web-server-info.txt << EOF
 === ИНФОРМАЦИЯ О ВЕБ-СЕРВЕРЕ ===
 Дата установки: $(date)
 Домен: $DOMAIN
-SSL: Включен (Let's Encrypt)
+SSL: $(if [ "$PROTOCOL" = "https" ]; then echo "Включен (Let's Encrypt)"; else echo "Не настроен"; fi)
+IP сервера: $(curl -s ifconfig.me)
 
 === ПАРОЛИ (СОХРАНИТЕ В БЕЗОПАСНОМ МЕСТЕ!) ===
 MySQL root пароль: $MYSQL_ROOT_PASSWORD
 WordPress DB пароль: $WP_DB_PASSWORD
 
 === ДОСТУП К СЕРВИСАМ ===
-Основной сайт: https://$DOMAIN
-WordPress админка: https://$DOMAIN/wp-admin
-phpMyAdmin: https://pma.$DOMAIN
+Основной сайт: $PROTOCOL://$DOMAIN
+WordPress админка: $PROTOCOL://$DOMAIN/wp-admin
+phpMyAdmin: $PROTOCOL://pma.$DOMAIN
 
 === БАЗА ДАННЫХ ===
 Имя базы WordPress: wordpress
 Пользователь WordPress: wpuser
 Хост: localhost
 
-=== ФАЙЛЫ И ДИРЕКТОРИИ ===
-Корень сайта: /var/www/$DOMAIN
-Конфигурация Apache: /etc/apache2/sites-available/$DOMAIN.conf
-Логи Apache: /var/log/apache2/
-Конфигурация PHP: /etc/php/*/apache2/php.ini
+=== DNS ТРЕБОВАНИЯ ===
+Убедитесь что настроены A-записи:
+$DOMAIN -> $(curl -s ifconfig.me)
+www.$DOMAIN -> $(curl -s ifconfig.me)
+pma.$DOMAIN -> $(curl -s ifconfig.me)
+
+=== КОМАНДЫ ДЛЯ SSL (если DNS не был настроен) ===
+Основной домен: certbot --apache -d $DOMAIN
+С www: certbot --apache -d $DOMAIN -d www.$DOMAIN --expand
+phpMyAdmin: certbot --apache -d pma.$DOMAIN
 
 === ПОЛЕЗНЫЕ КОМАНДЫ ===
 Перезапуск Apache: systemctl restart apache2
@@ -280,18 +347,20 @@ phpMyAdmin: https://pma.$DOMAIN
 Просмотр логов Apache: tail -f /var/log/apache2/$DOMAIN-error.log
 Обновление SSL: certbot renew
 Статус фаервола: ufw status
+Проверка DNS: dig $DOMAIN
 
 === СЛЕДУЮЩИЕ ШАГИ ===
-1. Откройте https://$DOMAIN в браузере
+1. Откройте $PROTOCOL://$DOMAIN в браузере
 2. Завершите установку WordPress через веб-интерфейс
-3. Настройте DNS для поддомена pma.$DOMAIN
-4. Регулярно обновляйте систему: apt update && apt upgrade
+3. Настройте DNS записи (если не были настроены)
+4. Получите SSL сертификаты (если DNS не работал)
+5. Регулярно обновляйте систему: apt update && apt upgrade
 EOF
 
 chmod 600 /root/web-server-info.txt
 
 # Завершение установки
-print_status "===== УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО! ====="
+print_status "===== УСТАНОВКА ЗАВЕРШЕНА! ====="
 echo ""
 print_status "Информация о системе сохранена в /root/web-server-info.txt"
 echo ""
@@ -299,15 +368,29 @@ print_status "ВАЖНЫЕ ПАРОЛИ (запишите их!):"
 echo "MySQL root: $MYSQL_ROOT_PASSWORD"
 echo "WordPress DB: $WP_DB_PASSWORD"
 echo ""
+print_status "Ваш IP адрес: $(curl -s ifconfig.me)"
+echo ""
 print_status "Доступ к сервисам:"
-echo "- Основной сайт: https://$DOMAIN"
-echo "- WordPress админка: https://$DOMAIN/wp-admin"  
-echo "- phpMyAdmin: https://pma.$DOMAIN"
+echo "- Основной сайт: $PROTOCOL://$DOMAIN"
+echo "- WordPress админка: $PROTOCOL://$DOMAIN/wp-admin"  
+echo "- phpMyAdmin: $PROTOCOL://pma.$DOMAIN"
+echo ""
+
+if [ "$PROTOCOL" = "http" ]; then
+    print_warning "SSL сертификаты не были получены из-за проблем с DNS"
+    print_warning "Настройте следующие A-записи у вашего DNS провайдера:"
+    echo "  $DOMAIN -> $(curl -s ifconfig.me)"
+    echo "  www.$DOMAIN -> $(curl -s ifconfig.me)"
+    echo "  pma.$DOMAIN -> $(curl -s ifconfig.me)"
+    print_warning "После настройки DNS выполните:"
+    echo "  certbot --apache -d $DOMAIN -d www.$DOMAIN"
+    echo "  certbot --apache -d pma.$DOMAIN"
+fi
+
 echo ""
 print_warning "Не забудьте:"
-echo "1. Настроить DNS для поддомена pma.$DOMAIN"
-echo "2. Завершить установку WordPress через браузер"
-echo "3. Изменить пароли по умолчанию в WordPress"
-echo "4. Регулярно обновлять систему"
+echo "1. Завершить установку WordPress через браузер"
+echo "2. Изменить пароли по умолчанию в WordPress"
+echo "3. Регулярно обновлять систему"
 echo ""
 print_status "Веб-сервер готов к использованию!"
