@@ -87,14 +87,22 @@ replace_wordpress_salts() {
 # Функция генерации простых солей
 generate_simple_salts() {
     local wp_config_path=$1
-    local auth_key=$(generate_password 64)
-    local secure_auth_key=$(generate_password 64)
-    local logged_in_key=$(generate_password 64)
-    local nonce_key=$(generate_password 64)
-    local auth_salt=$(generate_password 64)
-    local secure_auth_salt=$(generate_password 64)
-    local logged_in_salt=$(generate_password 64)
-    local nonce_salt=$(generate_password 64)
+    local auth_key
+    auth_key=$(generate_password 64)
+    local secure_auth_key
+    secure_auth_key=$(generate_password 64)
+    local logged_in_key
+    logged_in_key=$(generate_password 64)
+    local nonce_key
+    nonce_key=$(generate_password 64)
+    local auth_salt
+    auth_salt=$(generate_password 64)
+    local secure_auth_salt
+    secure_auth_salt=$(generate_password 64)
+    local logged_in_salt
+    logged_in_salt=$(generate_password 64)
+    local nonce_salt
+    nonce_salt=$(generate_password 64)
     
     # Безопасная замена с экранированием
     sed -i "s/put your unique phrase here.*AUTH_KEY.*/define('AUTH_KEY', '$auth_key');/" "$wp_config_path"
