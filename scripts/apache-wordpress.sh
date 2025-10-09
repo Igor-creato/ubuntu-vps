@@ -190,8 +190,7 @@ print_status "? MariaDB установлена и запущена"
 
 # Автоматическая настройка безопасности MariaDB
 print_header "Шаг 7: Настройка безопасности MariaDB"
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';" 2>/dev/null || \
-mysql -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$MYSQL_ROOT_PASSWORD');"
+mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASSWORD';"
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DELETE FROM mysql.user WHERE User='';"
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS test;"
@@ -368,6 +367,14 @@ phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2
 EOF
 DEBIAN_FRONTEND=noninteractive apt install -y phpmyadmin
 
+# Создание базы данных и пользователя для phpMyAdmin
+print_status "Создание базы данных и пользователя для phpMyAdmin..."
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS phpmyadmin DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE USER IF NOT EXISTS 'phpmyadmin'@'localhost' IDENTIFIED BY '$APP_PMA_PASSWORD';"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "GRANT ALL PRIVILEGES ON phpmyadmin.* TO 'phpmyadmin'@'localhost';"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "FLUSH PRIVILEGES;"
+print_status "? База данных и пользователь phpMyAdmin созданы"
+
 # Генерация и установка секретного ключа Blowfish для phpMyAdmin
 BLOWFISH_SECRET=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
 sed -i "s|\\\$cfg\\['blowfish_secret'\\] = '';|\$cfg['blowfish_secret'] = '$BLOWFISH_SECRET';|" /etc/phpmyadmin/config.inc.php
@@ -378,12 +385,6 @@ chown root:www-data /etc/phpmyadmin/config.inc.php
 chmod 640 /etc/phpmyadmin/config.inc.php
 print_status "? Права на config.inc.php заданы 640 и владелец root:www-data"
 
-# Создание таблиц хранилища конфигурации phpMyAdmin
-print_status "Создание таблиц хранилища конфигурации phpMyAdmin..."
-mysql -u root -p"$MYSQL_ROOT_PASSWORD" phpmyadmin < /usr/share/phpmyadmin/sql/create_tables.sql
-print_status "? Таблицы phpMyAdmin созданы"
-mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'phpmyadmin'@'localhost';"
-print_status "? Привилегии для phpmyadmin на phpmyadmin базе настроены"
 # Создание таблиц хранилища конфигурации phpMyAdmin
 print_status "Создание таблиц хранилища конфигурации phpMyAdmin..."
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" phpmyadmin < /usr/share/phpmyadmin/sql/create_tables.sql
