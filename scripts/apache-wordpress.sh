@@ -2,7 +2,7 @@
 
 # Автоматическая установка и настройка веб-сервера на Ubuntu 24.04
 # Включает: Apache, MariaDB, PHP 8.4, WordPress, phpMyAdmin, SSL-сертификаты
-# Версия: 2.0 с исправлениями ошибок
+# Версия: 2.1 с исправлениями ShellCheck
 
 set -e  # Остановить выполнение при ошибке
 
@@ -33,20 +33,20 @@ print_header() {
 # Функция генерации безопасных паролей
 generate_password() {
     local length=${1:-16}
-    openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+=' | head -c $length
+    openssl rand -base64 32 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+=' | head -c "$length"
 }
 
 # Функция проверки DNS
 check_dns() {
-    local domain=$1
+    local domain="$1"
     print_status "Проверка DNS для $domain..."
     
     if command -v dig > /dev/null; then
-        if dig +short $domain | grep -q '^[0-9]'; then
-            print_status "✓ DNS запись для $domain найдена"
+        if dig +short "$domain" | grep -q '^[0-9]'; then
+            print_status "? DNS запись для $domain найдена"
             return 0
         else
-            print_warning "✗ DNS запись для $domain не найдена"
+            print_warning "? DNS запись для $domain не найдена"
             return 1
         fi
     else
@@ -57,8 +57,13 @@ check_dns() {
 
 # Функция безопасной замены WordPress солей
 replace_wordpress_salts() {
-    local wp_config_path=$1
-    local temp_file=$(mktemp)
+    local wp_config_path="$1"
+    local temp_file
+    
+    if ! temp_file=$(mktemp); then
+        print_error "Не удалось создать временный файл"
+        return 1
+    fi
     
     print_status "Получение новых WordPress солей..."
     
@@ -78,14 +83,21 @@ replace_wordpress_salts() {
         sed -i '/put your unique phrase here/d' "$wp_config_path"
         
         # Вставляем новые соли перед строкой $table_prefix
-        sed -i "/\$table_prefix/i\\$(cat $temp_file)" "$wp_config_path"
+        sed -i "/\$table_prefix/i\\$(cat "$temp_file")" "$wp_config_path"
         
         rm "$temp_file"
-        print_status "✓ Соли WordPress успешно обновлены"
+        print_status "? Соли WordPress успешно обновлены"
     else
         print_warning "Не удалось получить соли WordPress. Используйте значения по умолчанию."
         rm -f "$temp_file"
     fi
+}
+
+# Функция безопасной замены пароля в wp-config.php
+escape_sed_replacement() {
+    local string="$1"
+    # Экранируем специальные символы для sed (используем двойные кавычки)
+    printf '%s\n' "$string" | sed "s/[\\[\\.*^$()+?{|]/\\\\&/g"
 }
 
 # Проверка прав суперпользователя
@@ -111,15 +123,15 @@ MYSQL_ROOT_PASSWORD=$(generate_password 20)
 WP_DB_PASSWORD=$(generate_password 16)
 
 echo ""
-print_status "🔐 Сгенерированы безопасные пароли:"
+print_status "?? Сгенерированы безопасные пароли:"
 echo "=================================================="
 echo "MySQL root пароль: $MYSQL_ROOT_PASSWORD"
 echo "WordPress DB пароль: $WP_DB_PASSWORD"
 echo "=================================================="
 echo ""
-print_warning "⚠️  ОБЯЗАТЕЛЬНО СОХРАНИТЕ ЭТИ ПАРОЛИ В БЕЗОПАСНОМ МЕСТЕ!"
+print_warning "??  ОБЯЗАТЕЛЬНО СОХРАНИТЕ ЭТИ ПАРОЛИ В БЕЗОПАСНОМ МЕСТЕ!"
 echo ""
-read -p "Нажмите Enter для продолжения после сохранения паролей..."
+read -r -p "Нажмите Enter для продолжения после сохранения паролей..."
 
 # Установка Apache
 print_header "Шаг 4: Установка Apache веб-сервера"
@@ -128,7 +140,7 @@ apt install -y apache2
 # Включение и запуск Apache
 systemctl enable apache2
 systemctl start apache2
-print_status "✓ Apache успешно установлен и запущен"
+print_status "? Apache успешно установлен и запущен"
 
 # Настройка файрвола UFW
 print_header "Шаг 5: Настройка файрвола UFW"
@@ -138,7 +150,7 @@ ufw default allow outgoing
 ufw allow ssh
 ufw allow http
 ufw allow https
-print_status "✓ Файрвол настроен"
+print_status "? Файрвол настроен"
 
 # Установка MariaDB
 print_header "Шаг 6: Установка MariaDB"
@@ -147,7 +159,7 @@ apt install -y mariadb-server
 # Включение и запуск MariaDB
 systemctl enable mariadb
 systemctl start mariadb
-print_status "✓ MariaDB установлена и запущена"
+print_status "? MariaDB установлена и запущена"
 
 # Автоматическая настройка безопасности MariaDB
 print_header "Шаг 7: Настройка безопасности MariaDB"
@@ -158,7 +170,7 @@ mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DELETE FROM mysql.user WHERE User='ro
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS test;"
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "FLUSH PRIVILEGES;"
-print_status "✓ Безопасность MariaDB настроена"
+print_status "? Безопасность MariaDB настроена"
 
 # Создание пользователя WordPress в базе данных
 print_header "Шаг 8: Создание базы данных WordPress"
@@ -166,7 +178,7 @@ mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE wordpress CHARACTER S
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE USER 'wpuser'@'localhost' IDENTIFIED BY '$WP_DB_PASSWORD';"
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wpuser'@'localhost';"
 mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "FLUSH PRIVILEGES;"
-print_status "✓ База данных WordPress создана"
+print_status "? База данных WordPress создана"
 
 # Установка PHP 8.4 и расширений
 print_header "Шаг 9: Установка PHP 8.4 и расширений"
@@ -187,13 +199,13 @@ a2dismod php8.3 2>/dev/null || true
 a2dismod php8.2 2>/dev/null || true
 a2dismod php8.1 2>/dev/null || true
 
-print_status "✓ Установлена PHP версия: $(php -v | head -1)"
+print_status "? Установлена PHP версия: $(php -v | head -1)"
 
 # Запрос домена
 print_header "Шаг 10: Настройка домена"
 echo ""
 while true; do
-    read -p "Введите домен для вашего сайта (например, example.com): " DOMAIN
+    read -r -p "Введите домен для вашего сайта (например, example.com): " DOMAIN
     if [ -n "$DOMAIN" ]; then
         break
     else
@@ -203,13 +215,13 @@ done
 
 # Создание директории для сайта
 print_status "Создание директории для сайта..."
-mkdir -p /var/www/$DOMAIN
-chown -R www-data:www-data /var/www/$DOMAIN
-chmod -R 755 /var/www
+mkdir -p "/var/www/$DOMAIN"
+chown -R www-data:www-data "/var/www/$DOMAIN"
+chmod -R 755 "/var/www/$DOMAIN"
 
 # Создание виртуального хоста Apache
 print_status "Создание виртуального хоста Apache..."
-cat > /etc/apache2/sites-available/$DOMAIN.conf << EOF
+cat > "/etc/apache2/sites-available/$DOMAIN.conf" << EOF
 <VirtualHost *:80>
     ServerAdmin webmaster@$DOMAIN
     ServerName $DOMAIN
@@ -228,12 +240,12 @@ cat > /etc/apache2/sites-available/$DOMAIN.conf << EOF
 EOF
 
 # Включение сайта
-a2ensite $DOMAIN.conf
+a2ensite "$DOMAIN.conf"
 a2dissite 000-default.conf
 
 # Перезапуск Apache
 systemctl reload apache2
-print_status "✓ Виртуальный хост создан и активирован"
+print_status "? Виртуальный хост создан и активирован"
 
 # Установка WordPress
 print_header "Шаг 11: Скачивание и установка WordPress"
@@ -242,30 +254,32 @@ wget https://wordpress.org/latest.tar.gz
 tar -xzf latest.tar.gz
 
 # Копирование файлов WordPress
-cp -R wordpress/* /var/www/$DOMAIN/
-chown -R www-data:www-data /var/www/$DOMAIN
-chmod -R 755 /var/www/$DOMAIN
+cp -R wordpress/* "/var/www/$DOMAIN/"
+chown -R www-data:www-data "/var/www/$DOMAIN"
+chmod -R 755 "/var/www/$DOMAIN"
 
 # Создание wp-config.php
 print_status "Настройка WordPress..."
-cd /var/www/$DOMAIN
+cd "/var/www/$DOMAIN"
 cp wp-config-sample.php wp-config.php
 
-# Настройка wp-config.php с экранированием специальных символов
+# Настройка wp-config.php с безопасной заменой паролей
 sed -i "s/database_name_here/wordpress/" wp-config.php
 sed -i "s/username_here/wpuser/" wp-config.php
-sed -i "s/password_here/$(echo "$WP_DB_PASSWORD" | sed 's/[[\.*^$()+?{|]/\\&/g')/" wp-config.php
+# Используем функцию для безопасного экранирования пароля
+escaped_password=$(escape_sed_replacement "$WP_DB_PASSWORD")
+sed -i "s/password_here/$escaped_password/" wp-config.php
 sed -i "s/localhost/localhost/" wp-config.php
 
 # Замена WordPress солей
 replace_wordpress_salts "/var/www/$DOMAIN/wp-config.php"
 
-print_status "✓ WordPress установлен и настроен"
+print_status "? WordPress установлен и настроен"
 
 # Запрос email для SSL
 print_header "Шаг 12: Настройка SSL сертификатов"
 echo ""
-read -p "Введите email для уведомлений Let's Encrypt (оставьте пустым для пропуска SSL): " EMAIL
+read -r -p "Введите email для уведомлений Let's Encrypt (оставьте пустым для пропуска SSL): " EMAIL
 
 # Получение SSL-сертификата с проверкой DNS
 SSL_SUCCESS=false
@@ -286,14 +300,15 @@ if [ -n "$EMAIL" ]; then
         
         # Получаем сертификат
         print_status "Получение SSL-сертификата Let's Encrypt..."
+        # shellcheck disable=SC2086
         if certbot --apache $CERT_DOMAINS --non-interactive --agree-tos --email "$EMAIL"; then
-            print_status "✓ SSL-сертификат успешно получен"
+            print_status "? SSL-сертификат успешно получен"
             SSL_SUCCESS=true
             
             # Настройка автоматического обновления сертификатов
             systemctl enable certbot.timer
             systemctl start certbot.timer
-            print_status "✓ Автоматическое обновление SSL сертификатов настроено"
+            print_status "? Автоматическое обновление SSL сертификатов настроено"
         else
             print_error "Ошибка получения SSL сертификата"
             print_warning "Сайт будет работать по HTTP. SSL можно настроить позже."
@@ -317,7 +332,7 @@ a2enconf phpmyadmin
 
 # Создание поддомена для phpMyAdmin
 print_status "Настройка поддомена pma.$DOMAIN для phpMyAdmin..."
-cat > /etc/apache2/sites-available/pma.$DOMAIN.conf << EOF
+cat > "/etc/apache2/sites-available/pma.$DOMAIN.conf" << EOF
 <VirtualHost *:80>
     ServerName pma.$DOMAIN
     DocumentRoot /usr/share/phpmyadmin
@@ -334,7 +349,7 @@ cat > /etc/apache2/sites-available/pma.$DOMAIN.conf << EOF
 EOF
 
 # Включение поддомена phpMyAdmin
-a2ensite pma.$DOMAIN.conf
+a2ensite "pma.$DOMAIN.conf"
 
 # Получение SSL для поддомена phpMyAdmin с проверкой DNS
 if [ -n "$EMAIL" ]; then
@@ -342,7 +357,7 @@ if [ -n "$EMAIL" ]; then
     if check_dns "pma.$DOMAIN"; then
         print_status "Получение SSL-сертификата для pma.$DOMAIN..."
         if certbot --apache -d "pma.$DOMAIN" --non-interactive --agree-tos --email "$EMAIL"; then
-            print_status "✓ SSL-сертификат для phpMyAdmin получен"
+            print_status "? SSL-сертификат для phpMyAdmin получен"
         else
             print_warning "Ошибка получения SSL для phpMyAdmin. Будет доступен по HTTP."
         fi
@@ -352,7 +367,7 @@ if [ -n "$EMAIL" ]; then
     fi
 fi
 
-print_status "✓ phpMyAdmin установлен"
+print_status "? phpMyAdmin установлен"
 
 # Настройка PHP 8.4 (увеличение лимитов для WordPress)
 print_header "Шаг 14: Оптимизация PHP для WordPress"
@@ -444,26 +459,26 @@ chmod 600 /root/web-server-info.txt
 
 # Завершение установки
 echo ""
-echo "🎉 ===== УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО! ===== 🎉"
+echo "?? ===== УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО! ===== ??"
 echo ""
-print_status "📋 Информация о системе сохранена в /root/web-server-info.txt"
+print_status "?? Информация о системе сохранена в /root/web-server-info.txt"
 echo ""
-print_status "🔐 ВАЖНЫЕ ПАРОЛИ (запишите их!):"
+print_status "?? ВАЖНЫЕ ПАРОЛИ (запишите их!):"
 echo "=================================================="
 echo "MySQL root: $MYSQL_ROOT_PASSWORD"
 echo "WordPress DB: $WP_DB_PASSWORD"
 echo "=================================================="
 echo ""
-print_status "🌐 Ваш IP адрес: $SERVER_IP"
+print_status "?? Ваш IP адрес: $SERVER_IP"
 echo ""
-print_status "🔗 Доступ к сервисам:"
+print_status "?? Доступ к сервисам:"
 echo "- Основной сайт: $PROTOCOL://$DOMAIN"
 echo "- WordPress админка: $PROTOCOL://$DOMAIN/wp-admin"
 echo "- phpMyAdmin: $PROTOCOL://pma.$DOMAIN"
 echo ""
 
 if [ "$PROTOCOL" = "http" ]; then
-    print_warning "⚠️  SSL сертификаты не были получены из-за проблем с DNS"
+    print_warning "??  SSL сертификаты не были получены из-за проблем с DNS"
     print_warning "Настройте следующие A-записи у вашего DNS провайдера:"
     echo "  $DOMAIN -> $SERVER_IP"
     echo "  www.$DOMAIN -> $SERVER_IP"
@@ -474,11 +489,11 @@ if [ "$PROTOCOL" = "http" ]; then
     echo ""
 fi
 
-print_warning "📝 Не забудьте:"
+print_warning "?? Не забудьте:"
 echo "1. Завершить установку WordPress через браузер"
 echo "2. Изменить пароли по умолчанию в WordPress"
 echo "3. Настроить регулярные бэкапы"
 echo "4. Регулярно обновлять систему"
 echo ""
-print_status "🚀 Веб-сервер готов к использованию!"
+print_status "?? Веб-сервер готов к использованию!"
 echo ""
