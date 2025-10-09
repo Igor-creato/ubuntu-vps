@@ -55,43 +55,48 @@ check_dns() {
     fi
 }
 
-# Функция безопасной замены WordPress солей
+# Упрощенная функция замены WordPress солей
 replace_wordpress_salts() {
-    local wp_config_path="$1"
-    local temp_file
+    local wp_config_path=$1
     
-    if ! temp_file=$(mktemp); then
-        print_error "Не удалось создать временный файл"
-        return 1
-    fi
+    print_status "Настройка WordPress солей..."
     
-    print_status "Получение новых WordPress солей..."
-    
-    # Скачиваем соли
-    if curl -s https://api.wordpress.org/secret-key/1.1/salt/ > "$temp_file"; then
-        print_status "Замена солей в wp-config.php..."
-        
-        # Удаляем старые строки с солями
-        sed -i '/AUTH_KEY/d' "$wp_config_path"
-        sed -i '/SECURE_AUTH_KEY/d' "$wp_config_path"
-        sed -i '/LOGGED_IN_KEY/d' "$wp_config_path"
-        sed -i '/NONCE_KEY/d' "$wp_config_path"
-        sed -i '/AUTH_SALT/d' "$wp_config_path"
-        sed -i '/SECURE_AUTH_SALT/d' "$wp_config_path"
-        sed -i '/LOGGED_IN_SALT/d' "$wp_config_path"
-        sed -i '/NONCE_SALT/d' "$wp_config_path"
-        sed -i '/put your unique phrase here/d' "$wp_config_path"
-        
-        # Вставляем новые соли перед строкой $table_prefix
-        sed -i "/\$table_prefix/i\\$(cat "$temp_file")" "$wp_config_path"
-        
-        rm "$temp_file"
-        print_status "? Соли WordPress успешно обновлены"
+    # Используем встроенные соли WP-CLI или простую замену
+    if command -v wp >/dev/null 2>&1; then
+        wp config shuffle-salts --path="$(dirname "$wp_config_path")" --allow-root 2>/dev/null || {
+            print_warning "WP-CLI недоступен, используем стандартные соли"
+            generate_simple_salts "$wp_config_path"
+        }
     else
-        print_warning "Не удалось получить соли WordPress. Используйте значения по умолчанию."
-        rm -f "$temp_file"
+        generate_simple_salts "$wp_config_path"
     fi
 }
+
+# Функция генерации простых солей
+generate_simple_salts() {
+    local wp_config_path=$1
+    local auth_key=$(generate_password 64)
+    local secure_auth_key=$(generate_password 64)
+    local logged_in_key=$(generate_password 64)
+    local nonce_key=$(generate_password 64)
+    local auth_salt=$(generate_password 64)
+    local secure_auth_salt=$(generate_password 64)
+    local logged_in_salt=$(generate_password 64)
+    local nonce_salt=$(generate_password 64)
+    
+    # Безопасная замена с экранированием
+    sed -i "s/put your unique phrase here.*AUTH_KEY.*/define('AUTH_KEY', '$auth_key');/" "$wp_config_path"
+    sed -i "s/put your unique phrase here.*SECURE_AUTH_KEY.*/define('SECURE_AUTH_KEY', '$secure_auth_key');/" "$wp_config_path"
+    sed -i "s/put your unique phrase here.*LOGGED_IN_KEY.*/define('LOGGED_IN_KEY', '$logged_in_key');/" "$wp_config_path"
+    sed -i "s/put your unique phrase here.*NONCE_KEY.*/define('NONCE_KEY', '$nonce_key');/" "$wp_config_path"
+    sed -i "s/put your unique phrase here.*AUTH_SALT.*/define('AUTH_SALT', '$auth_salt');/" "$wp_config_path"
+    sed -i "s/put your unique phrase here.*SECURE_AUTH_SALT.*/define('SECURE_AUTH_SALT', '$secure_auth_salt');/" "$wp_config_path"
+    sed -i "s/put your unique phrase here.*LOGGED_IN_SALT.*/define('LOGGED_IN_SALT', '$logged_in_salt');/" "$wp_config_path"
+    sed -i "s/put your unique phrase here.*NONCE_SALT.*/define('NONCE_SALT', '$nonce_salt');/" "$wp_config_path"
+    
+    print_status "✓ Соли WordPress успешно настроены"
+}
+
 
 # Функция безопасной замены пароля в wp-config.php
 escape_sed_replacement() {
