@@ -368,6 +368,56 @@ phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2
 EOF
 DEBIAN_FRONTEND=noninteractive apt install -y phpmyadmin
 
+# Генерация и установка секретного ключа Blowfish для phpMyAdmin
+BLOWFISH_SECRET=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+sed -i "s|\\\$cfg\\['blowfish_secret'\\] = '';|\$cfg['blowfish_secret'] = '$BLOWFISH_SECRET';|" /etc/phpmyadmin/config.inc.php
+print_status "? Blowfish secret установлен для phpMyAdmin"
+
+# Защита config.inc.php: владелец и права доступа
+chown root:www-data /etc/phpmyadmin/config.inc.php
+chmod 640 /etc/phpmyadmin/config.inc.php
+print_status "? Права на config.inc.php заданы 640 и владелец root:www-data"
+
+# Создание таблиц хранилища конфигурации phpMyAdmin
+print_status "Создание таблиц хранилища конфигурации phpMyAdmin..."
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" phpmyadmin < /usr/share/phpmyadmin/sql/create_tables.sql
+print_status "? Таблицы phpMyAdmin созданы"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'phpmyadmin'@'localhost';"
+print_status "? Привилегии для phpmyadmin на phpmyadmin базе настроены"
+# Создание таблиц хранилища конфигурации phpMyAdmin
+print_status "Создание таблиц хранилища конфигурации phpMyAdmin..."
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" phpmyadmin < /usr/share/phpmyadmin/sql/create_tables.sql
+print_status "? Таблицы phpMyAdmin созданы"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'phpmyadmin'@'localhost';"
+print_status "? Привилегии для phpmyadmin на phpmyadmin базе настроены"
+
+# Блок конфигурационного хранилища phpMyAdmin
+cat >> /etc/phpmyadmin/config.inc.php << EOF
+\$cfg['Servers'][\$i]['controluser'] = 'phpmyadmin';
+\$cfg['Servers'][\$i]['controlpass'] = '$APP_PMA_PASSWORD';
+\$cfg['Servers'][\$i]['pmadb'] = 'phpmyadmin';
+\$cfg['Servers'][\$i]['bookmarktable'] = 'pma__bookmark';
+\$cfg['Servers'][\$i]['relation'] = 'pma__relation';
+\$cfg['Servers'][\$i]['table_info'] = 'pma__table_info';
+\$cfg['Servers'][\$i]['table_coords'] = 'pma__table_coords';
+\$cfg['Servers'][\$i]['pdf_pages'] = 'pma__pdf_pages';
+\$cfg['Servers'][\$i]['column_info'] = 'pma__column_info';
+\$cfg['Servers'][\$i]['history'] = 'pma__history';
+\$cfg['Servers'][\$i]['table_uiprefs'] = 'pma__table_uiprefs';
+\$cfg['Servers'][\$i]['tracking'] = 'pma__tracking';
+\$cfg['Servers'][\$i]['userconfig'] = 'pma__userconfig';
+\$cfg['Servers'][\$i]['recent'] = 'pma__recent';
+\$cfg['Servers'][\$i]['favorite'] = 'pma__favorite';
+\$cfg['Servers'][\$i]['users'] = 'pma__users';
+\$cfg['Servers'][\$i]['usergroups'] = 'pma__usergroups';
+\$cfg['Servers'][\$i]['navigationhiding'] = 'pma__navigationhiding';
+\$cfg['Servers'][\$i]['savedsearches'] = 'pma__savedsearches';
+\$cfg['Servers'][\$i]['central_columns'] = 'pma__central_columns';
+\$cfg['Servers'][\$i]['designer_settings'] = 'pma__designer_settings';
+\$cfg['Servers'][\$i]['export_templates'] = 'pma__export_templates';
+EOF
+print_status "? Конфигурационное хранилище phpMyAdmin настроено"
+
 # Включение phpMyAdmin конфигурации
 ln -sf /etc/phpmyadmin/apache.conf /etc/apache2/conf-available/phpmyadmin.conf
 a2enconf phpmyadmin
