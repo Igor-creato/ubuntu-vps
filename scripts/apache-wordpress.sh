@@ -4,7 +4,9 @@
 # Включает: Apache, MariaDB, PHP 8.4, WordPress, phpMyAdmin, SSL-сертификаты
 # Версия: 2.1 с исправлениями ShellCheck
 
-set -e  # Остановить выполнение при ошибке
+set -euo pipefail  # Остановить выполнение при ошибке, выход при неустановленных переменных и ошибок в конвейере
+IFS=$'\n\t'       # Безопасный Internal Field Separator
+trap 'print_error "Ошибка на строке $LINENO"; exit 1' ERR
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -50,7 +52,17 @@ check_dns() {
             return 1
         fi
     else
-        print_warning "Утилита dig не найдена, пропускаем проверку DNS"
+        print_warning "Утилита dig не найдена, пробуем host"
+        if command -v host >/dev/null 2>&1; then
+            if host "$domain" | grep -q 'has address'; then
+                print_status "? DNS запись для $domain найдена (host)"
+                return 0
+            else
+                print_warning "? DNS запись для $domain не найдена (host)"
+                return 1
+            fi
+        fi
+        print_warning "Утилита dig и host не найдены, пропускаем проверку DNS"
         return 0
     fi
 }
@@ -126,12 +138,14 @@ apt install -y software-properties-common curl wget unzip ufw certbot python3-ce
 print_header "Шаг 3: Генерация безопасных паролей"
 MYSQL_ROOT_PASSWORD=$(generate_password 20)
 WP_DB_PASSWORD=$(generate_password 16)
+APP_PMA_PASSWORD=$(generate_password 16)
 
 echo ""
 print_status "?? Сгенерированы безопасные пароли:"
 echo "=================================================="
 echo "MySQL root пароль: $MYSQL_ROOT_PASSWORD"
 echo "WordPress DB пароль: $WP_DB_PASSWORD"
+echo "phpMyAdmin DB пароль: $APP_PMA_PASSWORD"
 echo "=================================================="
 echo ""
 print_warning "??  ОБЯЗАТЕЛЬНО СОХРАНИТЕ ЭТИ ПАРОЛИ В БЕЗОПАСНОМ МЕСТЕ!"
@@ -198,6 +212,13 @@ php8.4-common php8.4-bcmath php8.4-fpm libapache2-mod-php8.4
 a2enmod rewrite
 a2enmod ssl
 a2enmod php8.4
+
+# Установка WP-CLI, если отсутствует
+if ! command -v wp >/dev/null 2>&1; then
+    print_status "Установка WP-CLI..."
+    curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+    chmod +x /usr/local/bin/wp
+fi
 
 # Отключение старых версий PHP если они есть
 a2dismod php8.3 2>/dev/null || true
@@ -306,7 +327,7 @@ if [ -n "$EMAIL" ]; then
         # Получаем сертификат
         print_status "Получение SSL-сертификата Let's Encrypt..."
         # shellcheck disable=SC2086
-        if certbot --apache $CERT_DOMAINS --non-interactive --agree-tos --email "$EMAIL"; then
+        if certbot --apache --redirect --hsts --staple-ocsp $CERT_DOMAINS --non-interactive --agree-tos --email "$EMAIL"; then
             print_status "? SSL-сертификат успешно получен"
             SSL_SUCCESS=true
             
@@ -329,6 +350,14 @@ fi
 
 # Установка phpMyAdmin
 print_header "Шаг 13: Установка phpMyAdmin"
+print_status "Настройка автоматической конфигурации phpMyAdmin..."
+debconf-set-selections << EOF
+phpmyadmin phpmyadmin/dbconfig-install boolean true
+phpmyadmin phpmyadmin/app-password-confirm password $APP_PMA_PASSWORD
+phpmyadmin phpmyadmin/mysql/app-pass password $APP_PMA_PASSWORD
+phpmyadmin phpmyadmin/mysql/admin-pass password $MYSQL_ROOT_PASSWORD
+phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2
+EOF
 DEBIAN_FRONTEND=noninteractive apt install -y phpmyadmin
 
 # Включение phpMyAdmin конфигурации
@@ -361,7 +390,7 @@ if [ -n "$EMAIL" ]; then
     print_status "Проверка DNS для поддомена phpMyAdmin..."
     if check_dns "pma.$DOMAIN"; then
         print_status "Получение SSL-сертификата для pma.$DOMAIN..."
-        if certbot --apache -d "pma.$DOMAIN" --non-interactive --agree-tos --email "$EMAIL"; then
+        if certbot --apache --redirect --hsts --staple-ocsp -d "pma.$DOMAIN" --non-interactive --agree-tos --email "$EMAIL"; then
             print_status "? SSL-сертификат для phpMyAdmin получен"
         else
             print_warning "Ошибка получения SSL для phpMyAdmin. Будет доступен по HTTP."
@@ -417,6 +446,7 @@ IP сервера: $SERVER_IP
 === ПАРОЛИ (СОХРАНИТЕ В БЕЗОПАСНОМ МЕСТЕ!) ===
 MySQL root пароль: $MYSQL_ROOT_PASSWORD
 WordPress DB пароль: $WP_DB_PASSWORD
+phpMyAdmin DB пароль: $APP_PMA_PASSWORD
 
 === ДОСТУП К СЕРВИСАМ ===
 Основной сайт: $PROTOCOL://$DOMAIN
@@ -472,6 +502,7 @@ print_status "?? ВАЖНЫЕ ПАРОЛИ (запишите их!):"
 echo "=================================================="
 echo "MySQL root: $MYSQL_ROOT_PASSWORD"
 echo "WordPress DB: $WP_DB_PASSWORD"
+echo "phpMyAdmin DB: $APP_PMA_PASSWORD"
 echo "=================================================="
 echo ""
 print_status "?? Ваш IP адрес: $SERVER_IP"
