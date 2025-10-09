@@ -9,7 +9,6 @@
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Function to print colored output
@@ -32,14 +31,14 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Get domain name from user
-read -p "Enter your domain name (example.com): " DOMAIN
+read -r -p "Enter your domain name (example.com): " DOMAIN
 if [ -z "$DOMAIN" ]; then
     print_error "Domain name is required"
     exit 1
 fi
 
 # Get email for SSL certificate
-read -p "Enter your email address for SSL certificate: " EMAIL
+read -r -p "Enter your email address for SSL certificate: " EMAIL
 if [ -z "$EMAIL" ]; then
     print_error "Email is required for SSL certificate"
     exit 1
@@ -47,7 +46,7 @@ fi
 
 # Create log file
 LOG_FILE="/var/log/lamp-install.log"
-exec 1> >(tee -a $LOG_FILE)
+exec 1> >(tee -a "$LOG_FILE")
 exec 2>&1
 
 print_status "Starting LAMP installation for domain: $DOMAIN"
@@ -80,11 +79,11 @@ apt install -y mariadb-server mariadb-client
 print_status "Securing MariaDB installation..."
 MYSQL_ROOT_PASSWORD=$(openssl rand -base64 32)
 mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';"
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "DELETE FROM mysql.user WHERE User='';"
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "DROP DATABASE IF EXISTS test;"
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%';"
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "FLUSH PRIVILEGES;"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DELETE FROM mysql.user WHERE User='';"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS test;"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%';"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "FLUSH PRIVILEGES;"
 
 # Install PHP
 print_status "Installing PHP and extensions..."
@@ -94,7 +93,7 @@ apt install -y php php-mysql php-xml php-gd php-curl php-mbstring php-zip php-in
 print_status "Installing phpMyAdmin..."
 echo 'phpmyadmin phpmyadmin/dbconfig-install boolean true' | debconf-set-selections
 echo 'phpmyadmin phpmyadmin/app-password-confirm password' | debconf-set-selections
-echo 'phpmyadmin phpmyadmin/mysql/admin-pass password '$MYSQL_ROOT_PASSWORD | debconf-set-selections
+echo 'phpmyadmin phpmyadmin/mysql/admin-pass password '"$MYSQL_ROOT_PASSWORD" | debconf-set-selections
 echo 'phpmyadmin phpmyadmin/mysql/app-pass password' | debconf-set-selections
 echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections
 apt install -y phpmyadmin
@@ -105,14 +104,14 @@ WP_DB_NAME="wordpress_$(date +%Y%m%d)"
 WP_DB_USER="wp_user"
 WP_DB_PASSWORD=$(openssl rand -base64 32)
 
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "CREATE DATABASE $WP_DB_NAME DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "CREATE USER '$WP_DB_USER'@'localhost' IDENTIFIED BY '$WP_DB_PASSWORD';"
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "GRANT ALL PRIVILEGES ON $WP_DB_NAME.* TO '$WP_DB_USER'@'localhost';"
-mysql -u root -p$MYSQL_ROOT_PASSWORD -e "FLUSH PRIVILEGES;"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE $WP_DB_NAME DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE USER '$WP_DB_USER'@'localhost' IDENTIFIED BY '$WP_DB_PASSWORD';"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "GRANT ALL PRIVILEGES ON $WP_DB_NAME.* TO '$WP_DB_USER'@'localhost';"
+mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "FLUSH PRIVILEGES;"
 
 # Create Apache virtual host
 print_status "Creating Apache virtual host..."
-cat > /etc/apache2/sites-available/$DOMAIN.conf << EOF
+cat > /etc/apache2/sites-available/"$DOMAIN".conf << EOF
 <VirtualHost *:80>
     ServerName $DOMAIN
     ServerAlias www.$DOMAIN
@@ -130,24 +129,24 @@ cat > /etc/apache2/sites-available/$DOMAIN.conf << EOF
 EOF
 
 # Enable site and disable default
-a2ensite $DOMAIN.conf
+a2ensite "$DOMAIN".conf
 a2dissite 000-default.conf
 
 # Create web directory
-mkdir -p /var/www/$DOMAIN
+mkdir -p /var/www/"$DOMAIN"
 
 # Download and install WordPress
 print_status "Downloading and installing WordPress..."
-cd /tmp
+cd /tmp || exit
 wget https://wordpress.org/latest.tar.gz
 tar xzf latest.tar.gz
-cp -R wordpress/* /var/www/$DOMAIN/
-chown -R www-data:www-data /var/www/$DOMAIN
-chmod -R 755 /var/www/$DOMAIN
+cp -R wordpress/* /var/www/"$DOMAIN"/
+chown -R www-data:www-data /var/www/"$DOMAIN"
+chmod -R 755 /var/www/"$DOMAIN"
 
 # Configure WordPress
 print_status "Configuring WordPress..."
-cd /var/www/$DOMAIN
+cd /var/www/"$DOMAIN" || exit
 cp wp-config-sample.php wp-config.php
 
 # Generate WordPress salts
@@ -180,7 +179,7 @@ systemctl restart apache2
 
 # Get SSL certificate
 print_status "Obtaining SSL certificate from Let's Encrypt..."
-certbot --apache --non-interactive --agree-tos --email $EMAIL --domains $DOMAIN --domains www.$DOMAIN
+certbot --apache --non-interactive --agree-tos --email "$EMAIL" --domains "$DOMAIN" --domains www."$DOMAIN"
 
 # Set up automatic certificate renewal
 print_status "Setting up automatic certificate renewal..."
