@@ -65,6 +65,8 @@ WORKDIR="wp"
 mkdir -p "${WORKDIR}"
 cd "${WORKDIR}"
 
+mkdir -p ./db_data ./wp_data
+
 umask 077
 
 # --- Генерация секретов и .env ---
@@ -166,7 +168,7 @@ services:
       - MARIADB_PASSWORD=${DB_PASSWORD}
       - MARIADB_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
     volumes:
-      - db_data:/var/lib/mysql
+      - ./db_data:/var/lib/mysql
     healthcheck:
       test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p${DB_ROOT_PASSWORD} || exit 1"]
       interval: 10s
@@ -197,7 +199,7 @@ services:
       - LOGGED_IN_SALT=${WP_LOGGED_IN_SALT}
       - NONCE_SALT=${WP_NONCE_SALT}
     volumes:
-      - wp_data:/var/www/html
+      - ./wp_data:/var/www/html
       - ./php-config/wordpress.ini:/usr/local/etc/php/conf.d/wordpress.ini:ro
     labels:
       - "traefik.enable=true"
