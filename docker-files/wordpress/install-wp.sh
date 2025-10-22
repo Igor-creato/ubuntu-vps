@@ -5,6 +5,7 @@
 #  - Traefik уже запущен отдельно и использует внешнюю сеть "proxy".
 #  - phpMyAdmin защищён Basic Auth через файл (/auth/.htpasswd) — или через встроенный хеш в label.
 #  - Секреты (MariaDB, WP salts) и удобные поля (логин/пароль BasicAuth) пишутся в ./wp/.env.
+#  - Увеличены лимиты PHP для WordPress через custom ini файл.
 cd ~
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -67,8 +68,13 @@ cd "${WORKDIR}"
 umask 077
 
 # --- Генерация секретов и .env ---
+# Генерация паролей только из алфавитно-цифровых символов (без специальных символов)
+gen_secret_safe() { 
+  tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32
+}
+
+# Для WordPress salts используем base64, так как WordPress обрабатывает их корректно
 gen_secret_b64() { openssl rand -base64 48 | tr -d '\n'; }
-gen_secret_hex() { openssl rand -hex 16 | tr -d '\n'; }
 
 touch .env
 put_env_if_absent() {
@@ -83,8 +89,8 @@ put_env_if_absent "TRAEFIK_CERT_RESOLVER"  "letsencrypt"
 
 put_env_if_absent "DB_NAME"          "wordpress"
 put_env_if_absent "DB_USER"          "wp_user"
-put_env_if_absent "DB_PASSWORD"      "$(gen_secret_b64)"
-put_env_if_absent "DB_ROOT_PASSWORD" "$(gen_secret_b64)"
+put_env_if_absent "DB_PASSWORD"      "$(gen_secret_safe)"
+put_env_if_absent "DB_ROOT_PASSWORD" "$(gen_secret_safe)"
 
 put_env_if_absent "WP_AUTH_KEY"          "$(gen_secret_b64)"
 put_env_if_absent "WP_SECURE_AUTH_KEY"   "$(gen_secret_b64)"
@@ -97,7 +103,7 @@ put_env_if_absent "WP_NONCE_SALT"        "$(gen_secret_b64)"
 
 mkdir -p auth
 put_env_if_absent "PMA_BASIC_AUTH_USER"  "admin"
-put_env_if_absent "PMA_BASIC_AUTH_PASS"  "$(gen_secret_hex)"
+put_env_if_absent "PMA_BASIC_AUTH_PASS"  "$(gen_secret_safe)"
 
 # Поднимем переменные окружения из .env
 set -a && source .env && set +a
@@ -119,6 +125,20 @@ log "Файл auth/.htpasswd создан. Данные BasicAuth (логин/п
 # Считаем строку "user:hash" и экранируем $ для безопасной подстановки в label
 HASH="$(tr -d '\r\n' < auth/.htpasswd | sed 's/\$/$$/g')"
 export HASH
+
+# --- Создание custom PHP конфигурации для WordPress ---
+mkdir -p php-config
+cat > php-config/wordpress.ini <<'INI'
+file_uploads = On
+memory_limit = 256M
+upload_max_filesize = 64M
+post_max_size = 64M
+max_execution_time = 300
+max_input_vars = 3000
+max_file_uploads = 20
+INI
+
+log "Создан файл php-config/wordpress.ini с увеличенными лимитами PHP."
 
 # --- Генерация docker-compose.yml.tpl (шаблон, без интерполяции шеллом) ---
 compose_needs_write=true
@@ -148,7 +168,7 @@ services:
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p\"${DB_ROOT_PASSWORD}\" || exit 1"]
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p${DB_ROOT_PASSWORD} || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -178,6 +198,7 @@ services:
       - NONCE_SALT=${WP_NONCE_SALT}
     volumes:
       - wp_data:/var/www/html
+      - ./php-config/wordpress.ini:/usr/local/etc/php/conf.d/wordpress.ini:ro
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
@@ -319,3 +340,4 @@ echo "Примечания:"
 echo " - Убедитесь, что DNS для ${WP_DOMAIN} и pma.${WP_DOMAIN} указывает на этот сервер."
 echo " - В Traefik должны существовать entrypoints 'web' (80) и 'websecure' (443), а также certresolver '${TRAEFIK_CERT_RESOLVER}'."
 echo " - Файл ./wp/.env содержит секреты; ./wp/auth/.htpasswd — исходник для BasicAuth (хеш встроен в label)."
+echo " - Файл ./wp/php-config/wordpress.ini содержит пользовательские настройки PHP."
