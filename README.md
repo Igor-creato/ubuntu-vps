@@ -49,6 +49,10 @@ install xray
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/docker-files/xray/install-xray.sh)
 ```
+Установка обработки хука
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/hook.sh)
+```
 install apache mariadb wordpress
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts/apache-wordpress.sh)
