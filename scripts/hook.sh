@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Скрипт для создания и запуска N8N с Redis в режиме очереди через Traefik
-# Создает структуру папок, конфигурационные файлы и запускает контейнеры
+# Настроен для работы с сетью proxy
 
 set -e
 
@@ -44,6 +44,19 @@ check_dependencies() {
     fi
     
     print_success "Все зависимости установлены"
+}
+
+# Проверка сети proxy
+check_proxy_network() {
+    print_status "Проверка сети proxy..."
+    
+    if ! docker network ls | grep -q "proxy"; then
+        print_warning "Сеть 'proxy' не найдена. Создание сети..."
+        docker network create proxy
+        print_success "Сеть 'proxy' создана"
+    else
+        print_success "Сеть 'proxy' уже существует"
+    fi
 }
 
 # Генерация безопасного пароля
@@ -133,9 +146,9 @@ EOF
     print_warning "N8N ключ шифрования: $N8N_ENCRYPTION_KEY"
 }
 
-# Создание docker-compose.yml
+# Создание docker-compose.yml для работы с сетью proxy
 create_docker_compose() {
-    print_status "Создание docker-compose.yml..."
+    print_status "Создание docker-compose.yml для сети proxy..."
     
     cat > docker-compose.yml << 'EOF'
 version: '3.9'
@@ -153,7 +166,7 @@ services:
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     networks:
-      - n8n-network
+      - n8n-internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -169,14 +182,14 @@ services:
     volumes:
       - ./data/redis:/data
     networks:
-      - n8n-network
+      - n8n-internal
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # N8N основной экземпляр (webhook processor + editor)
+  # N8N основной экземпляр (webhook processor)
   n8n-main:
     image: n8nio/n8n:latest
     container_name: n8n_main
@@ -211,26 +224,30 @@ services:
     volumes:
       - ./data/n8n:/home/node/.n8n
     networks:
-      - n8n-network
-      - traefik
+      - n8n-internal
+      - proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=traefik"
+      - "traefik.docker.network=proxy"
+      
+      # Webhook роутер (hook.autmatization-bot.ru)
       - "traefik.http.routers.n8n-webhook.rule=Host(\`${N8N_HOST}\`)"
       - "traefik.http.routers.n8n-webhook.entrypoints=websecure"
       - "traefik.http.routers.n8n-webhook.tls.certresolver=letsencrypt"
       - "traefik.http.routers.n8n-webhook.service=n8n-webhook"
       - "traefik.http.services.n8n-webhook.loadbalancer.server.port=5678"
-      - "traefik.http.routers.n8n-webhook.middlewares=n8n-headers"
-      - "traefik.http.middlewares.n8n-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
-      - "traefik.http.middlewares.n8n-headers.headers.customrequestheaders.X-Forwarded-Host=${N8N_HOST}"
+      
+      # Middleware для webhook
+      - "traefik.http.routers.n8n-webhook.middlewares=n8n-webhook-headers"
+      - "traefik.http.middlewares.n8n-webhook-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+      - "traefik.http.middlewares.n8n-webhook-headers.headers.customrequestheaders.X-Forwarded-Host=${N8N_HOST}"
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:5678/healthz || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
 
-  # N8N Editor экземпляр
+  # N8N Editor экземпляр (отдельный домен для редактора)
   n8n-editor:
     image: n8nio/n8n:latest
     container_name: n8n_editor
@@ -264,16 +281,20 @@ services:
     volumes:
       - ./data/n8n:/home/node/.n8n
     networks:
-      - n8n-network
-      - traefik
+      - n8n-internal
+      - proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=traefik"
+      - "traefik.docker.network=proxy"
+      
+      # Editor роутер (n8n.autmatization-bot.ru)
       - "traefik.http.routers.n8n-editor.rule=Host(\`${N8N_EDITOR_HOST}\`)"
       - "traefik.http.routers.n8n-editor.entrypoints=websecure"
       - "traefik.http.routers.n8n-editor.tls.certresolver=letsencrypt"
       - "traefik.http.routers.n8n-editor.service=n8n-editor"
       - "traefik.http.services.n8n-editor.loadbalancer.server.port=5678"
+      
+      # Middleware для editor
       - "traefik.http.routers.n8n-editor.middlewares=n8n-editor-headers"
       - "traefik.http.middlewares.n8n-editor-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
       - "traefik.http.middlewares.n8n-editor-headers.headers.customrequestheaders.X-Forwarded-Host=${N8N_EDITOR_HOST}"
@@ -283,7 +304,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # N8N Workers
+  # N8N Workers (обработка задач из очереди Redis)
   n8n-worker:
     image: n8nio/n8n:latest
     restart: unless-stopped
@@ -312,7 +333,7 @@ services:
     volumes:
       - ./data/n8n:/home/node/.n8n
     networks:
-      - n8n-network
+      - n8n-internal
     deploy:
       replicas: 2
     healthcheck:
@@ -322,10 +343,15 @@ services:
       retries: 3
 
 networks:
-  n8n-network:
+  # Внутренняя сеть для связи между сервисами N8N, PostgreSQL и Redis
+  n8n-internal:
     driver: bridge
-  traefik:
+    internal: false
+  
+  # Внешняя сеть для Traefik
+  proxy:
     external: true
+    name: proxy
 
 volumes:
   postgres_data:
@@ -333,7 +359,7 @@ volumes:
   n8n_data:
 EOF
 
-    print_success "docker-compose.yml создан"
+    print_success "docker-compose.yml создан для сети proxy"
 }
 
 # Создание скрипта для управления
@@ -373,20 +399,58 @@ show_help() {
     echo "  stop          Остановить все сервисы"
     echo "  restart       Перезапустить все сервисы"
     echo "  logs          Показать логи всех сервисов"
+    echo "  logs-main     Показать логи основного N8N"
+    echo "  logs-editor   Показать логи редактора N8N"
+    echo "  logs-worker   Показать логи worker'ов"
+    echo "  logs-redis    Показать логи Redis"
+    echo "  logs-db       Показать логи PostgreSQL"
     echo "  status        Показать статус сервисов"
+    echo "  scale [N]     Масштабировать worker'ы до N экземпляров"
+    echo "  network       Показать информацию о сетях"
     echo "  help          Показать эту справку"
 }
 
 start_services() {
+    print_status "Проверка сети proxy..."
+    if ! docker network ls | grep -q "proxy"; then
+        print_warning "Создание сети proxy..."
+        docker network create proxy
+    fi
+    
     print_status "Запуск сервисов N8N..."
     if docker compose up -d; then
         print_success "Сервисы запущены"
-        print_status "Webhook endpoint: https://hook.autmatization-bot.ru/"
-        print_status "Editor interface: https://n8n.autmatization-bot.ru/"
+        echo ""
+        print_status "Доступ к сервисам:"
+        print_status "  - Webhook endpoint: https://hook.autmatization-bot.ru/"
+        print_status "  - Editor interface: https://n8n.autmatization-bot.ru/"
+        echo ""
+        print_status "Проверьте статус: ./manage.sh status"
     else
         print_error "Ошибка запуска сервисов"
         exit 1
     fi
+}
+
+show_network_info() {
+    print_status "Информация о сетях:"
+    echo ""
+    print_status "Сеть proxy:"
+    docker network inspect proxy 2>/dev/null | grep -A 10 "Containers" || print_warning "Сеть proxy не найдена"
+    echo ""
+    print_status "Внутренняя сеть N8N:"
+    docker network inspect hook_n8n-internal 2>/dev/null | grep -A 10 "Containers" || print_warning "Внутренняя сеть N8N не найдена"
+}
+
+scale_workers() {
+    if [ -z "$1" ]; then
+        print_error "Укажите количество worker'ов"
+        exit 1
+    fi
+    
+    print_status "Масштабирование worker'ов до $1 экземпляров..."
+    docker compose up -d --scale n8n-worker="$1"
+    print_success "Worker'ы масштабированы до $1 экземпляров"
 }
 
 case "$1" in
@@ -395,15 +459,42 @@ case "$1" in
         ;;
     stop)
         docker compose down
+        print_success "Сервисы остановлены"
         ;;
     restart)
         docker compose restart
+        print_success "Сервисы перезапущены"
         ;;
     logs)
-        docker compose logs -f
+        docker compose logs -f --tail=100
+        ;;
+    logs-main)
+        docker compose logs -f --tail=100 n8n-main
+        ;;
+    logs-editor)
+        docker compose logs -f --tail=100 n8n-editor
+        ;;
+    logs-worker)
+        docker compose logs -f --tail=100 n8n-worker
+        ;;
+    logs-redis)
+        docker compose logs -f --tail=100 redis
+        ;;
+    logs-db)
+        docker compose logs -f --tail=100 postgres
         ;;
     status)
+        print_status "Статус сервисов:"
         docker compose ps
+        echo ""
+        print_status "Использование ресурсов:"
+        docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
+        ;;
+    scale)
+        scale_workers "$2"
+        ;;
+    network)
+        show_network_info
         ;;
     help|--help|-h|"")
         show_help
@@ -420,36 +511,13 @@ EOF
     print_success "Скрипт управления создан (manage.sh)"
 }
 
-# Запуск сервисов
-start_services() {
-    print_status "Проверка сети Traefik..."
-    if ! docker network ls | grep -q "traefik"; then
-        print_warning "Создание сети traefik..."
-        docker network create traefik
-    fi
-    
-    print_status "Запуск сервисов N8N..."
-    if docker compose up -d; then
-        print_success "Сервисы запущены успешно!"
-        echo ""
-        print_status "Доступ к сервисам:"
-        print_status "  - Webhook endpoint: https://hook.autmatization-bot.ru/"
-        print_status "  - Editor interface: https://n8n.autmatization-bot.ru/"
-        echo ""
-        print_status "Проверьте статус сервисов: ./manage.sh status"
-        print_status "Просмотр логов: ./manage.sh logs"
-    else
-        print_error "Ошибка при запуске сервисов"
-        exit 1
-    fi
-}
-
 # Основная функция
 main() {
-    print_status "Установка N8N с Redis в режиме очереди и Traefik"
+    print_status "Установка N8N с Redis в режиме очереди для сети proxy"
     echo ""
     
     check_dependencies
+    check_proxy_network
     create_directories
     create_env_file
     create_docker_compose
@@ -464,7 +532,21 @@ main() {
     read -p "Запустить сервисы сейчас? (y/n): " -r
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo ""
-        start_services
+        # Запуск сервисов
+        print_status "Запуск сервисов N8N..."
+        if docker compose up -d; then
+            print_success "Сервисы запущены успешно!"
+            echo ""
+            print_status "Доступ к сервисам:"
+            print_status "  - Webhook endpoint: https://hook.autmatization-bot.ru/"
+            print_status "  - Editor interface: https://n8n.autmatization-bot.ru/"
+            echo ""
+            print_status "Проверьте статус сервисов: ./manage.sh status"
+            print_status "Просмотр логов: ./manage.sh logs"
+        else
+            print_error "Ошибка при запуске сервисов"
+            exit 1
+        fi
     else
         print_status "Сервисы не запущены. Используйте './manage.sh start' для запуска."
     fi
