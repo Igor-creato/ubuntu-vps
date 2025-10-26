@@ -666,7 +666,6 @@ EOF
 }
 
 # Создание README с инструкциями для MariaDB
-# Создание README с инструкциями для MariaDB
 create_readme() {
     print_status "Создание README файла..."
     
