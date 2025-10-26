@@ -151,7 +151,6 @@ create_docker_compose() {
     print_status "Создание docker-compose.yml для сети proxy..."
     
     cat > docker-compose.yml << 'EOF'
-version: '3.9'
 
 services:
   # PostgreSQL база данных
