@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Скрипт для создания и запуска N8N с Redis в режиме очереди через Traefik
-# Настроен для работы с сетью proxy - ИСПРАВЛЕННАЯ ВЕРСИЯ
+# Настроен для работы с внешней MariaDB - БЕЗ PostgreSQL
 
 set -e
 
@@ -46,16 +46,26 @@ check_dependencies() {
     print_success "Все зависимости установлены"
 }
 
-# Проверка сети proxy
-check_proxy_network() {
-    print_status "Проверка сети proxy..."
+# Проверка сетей
+check_networks() {
+    print_status "Проверка Docker сетей..."
     
+    # Проверка сети proxy для Traefik
     if ! docker network ls | grep -q "proxy"; then
         print_warning "Сеть 'proxy' не найдена. Создание сети..."
         docker network create proxy
         print_success "Сеть 'proxy' создана"
     else
         print_success "Сеть 'proxy' уже существует"
+    fi
+    
+    # Проверка сети backend для MariaDB
+    if ! docker network ls | grep -q "backend"; then
+        print_warning "Сеть 'backend' не найдена. Создание сети..."
+        docker network create backend
+        print_success "Сеть 'backend' создана"
+    else
+        print_success "Сеть 'backend' уже существует"
     fi
 }
 
@@ -69,7 +79,7 @@ configure_redis_sysctl() {
         print_warning "Настройка vm.overcommit_memory для Redis..."
         if command -v sudo &> /dev/null; then
             sudo sysctl vm.overcommit_memory=1
-            echo "vm.overcommit_memory = 1" | sudo tee -a /etc/sysctl.conf >/dev/null
+            echo "vm.overcommit_memory = 1" | sudo tee -a /etc/sysctl.conf >/dev/null 2>&1 || true
         else
             sysctl vm.overcommit_memory=1 2>/dev/null || print_warning "Не удалось настроить vm.overcommit_memory"
         fi
@@ -97,28 +107,21 @@ create_directories() {
     mkdir -p hook
     cd hook
     
-    # Создаем папки для данных
+    # Создаем папки для данных (без PostgreSQL)
     mkdir -p data/n8n
-    mkdir -p data/postgres
     mkdir -p data/redis
     
     print_success "Структура папок создана в $(pwd)"
 }
 
-# Создание .env файла с исправленными параметрами
+# Создание .env файла БЕЗ PostgreSQL
 create_env_file() {
-    print_status "Создание файла конфигурации .env..."
+    print_status "Создание файла конфигурации .env (без PostgreSQL)..."
     
-    # Генерируем пароли и ключи
-    POSTGRES_PASSWORD=$(generate_password)
+    # Генерируем ключи
     N8N_ENCRYPTION_KEY=$(generate_encryption_key)
     
     cat > .env << EOF
-# PostgreSQL настройки
-POSTGRES_DB=n8n
-POSTGRES_USER=n8n
-POSTGRES_PASSWORD=$POSTGRES_PASSWORD
-
 # N8N настройки
 N8N_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
 EXECUTIONS_MODE=queue
@@ -132,20 +135,12 @@ N8N_EDITOR_HOST=n8n.autmatization-bot.ru
 N8N_EDITOR_PROTOCOL=https
 N8N_EDITOR_PORT=5679
 
-# База данных настройки
-DB_TYPE=postgresdb
-DB_POSTGRESDB_HOST=postgres
-DB_POSTGRESDB_PORT=5432
-DB_POSTGRESDB_DATABASE=n8n
-DB_POSTGRESDB_USER=n8n
-DB_POSTGRESDB_PASSWORD=$POSTGRES_PASSWORD
-
 # Redis настройки
 QUEUE_BULL_REDIS_HOST=redis
 QUEUE_BULL_REDIS_PORT=6379
 QUEUE_BULL_REDIS_DB=0
 
-# N8N Современные настройки (устраняют warnings)
+# N8N современные настройки (устраняют warnings)
 N8N_RUNNERS_ENABLED=true
 OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
 N8N_BLOCK_ENV_ACCESS_IN_NODE=false
@@ -165,41 +160,32 @@ GENERIC_TIMEZONE=Europe/Moscow
 N8N_DISABLE_PRODUCTION_MAIN_PROCESS=false
 N8N_ENDPOINT_WEBHOOK=webhook
 N8N_ENDPOINT_WEBHOOK_TEST=webhook-test
+
+# Информация о внешней MariaDB (для справки)
+# Подключение к MariaDB через credentials в N8N UI:
+# Host: wp-db (имя контейнера)
+# Port: 3306
+# Database: wordpress
+# User/Password: из вашего .env файла MariaDB
+MARIADB_CONTAINER_NAME=wp-db
+MARIADB_DATABASE=wordpress
+MARIADB_PORT=3306
 EOF
 
-    print_success "Файл .env создан с уникальными паролями и ключами"
-    print_warning "Сохраните пароли в безопасном месте:"
-    print_warning "PostgreSQL пароль: $POSTGRES_PASSWORD"
+    print_success "Файл .env создан без PostgreSQL"
+    print_warning "Файл содержит ключ шифрования N8N:"
     print_warning "N8N ключ шифрования: $N8N_ENCRYPTION_KEY"
+    print_status "Подключение к MariaDB настраивается через UI N8N (host: wp-db)"
 }
 
-# Создание исправленного docker-compose.yml
+# Создание docker-compose.yml БЕЗ PostgreSQL + подключение к backend сети
 create_docker_compose() {
-    print_status "Создание исправленного docker-compose.yml..."
+    print_status "Создание docker-compose.yml для работы с внешней MariaDB..."
     
     cat > docker-compose.yml << 'EOF'
-# Удалена устаревшая строка version (Docker Compose v2+)
+# N8N с Redis (без PostgreSQL) + подключение к MariaDB через сеть backend
 services:
-  # PostgreSQL база данных
-  postgres:
-    image: postgres:16-alpine
-    container_name: n8n_postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - ./data/postgres:/var/lib/postgresql/data
-    networks:
-      - n8n-internal
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Redis для очередей с исправленными настройками
+  # Redis для очередей
   redis:
     image: redis:7-alpine
     container_name: n8n_redis
@@ -223,8 +209,6 @@ services:
     container_name: n8n_main
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
@@ -234,12 +218,10 @@ services:
       - WEBHOOK_URL=${WEBHOOK_URL}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - DB_TYPE=${DB_TYPE}
-      - DB_POSTGRESDB_HOST=${DB_POSTGRESDB_HOST}
-      - DB_POSTGRESDB_PORT=${DB_POSTGRESDB_PORT}
-      - DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE}
-      - DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER}
-      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      
+      # SQLite для метаданных N8N (по умолчанию)
+      # DB_TYPE не указываем - автоматически SQLite
+      
       - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
       - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
       - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
@@ -259,6 +241,7 @@ services:
     networks:
       - n8n-internal
       - proxy
+      - backend  # Подключение к сети MariaDB
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
@@ -273,14 +256,12 @@ services:
       timeout: 10s
       retries: 3
 
-  # N8N Editor экземпляр (исправлен host)
+  # N8N Editor экземпляр (отдельный домен для редактирования)
   n8n-editor:
     image: n8nio/n8n:latest
     container_name: n8n_editor
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
@@ -290,12 +271,9 @@ services:
       - WEBHOOK_URL=${WEBHOOK_URL}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - DB_TYPE=${DB_TYPE}
-      - DB_POSTGRESDB_HOST=${DB_POSTGRESDB_HOST}
-      - DB_POSTGRESDB_PORT=${DB_POSTGRESDB_PORT}
-      - DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE}
-      - DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER}
-      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      
+      # SQLite для метаданных N8N (общая база с main)
+      
       - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
       - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
       - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
@@ -314,6 +292,7 @@ services:
     networks:
       - n8n-internal
       - proxy
+      - backend  # Подключение к сети MariaDB
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
@@ -334,20 +313,15 @@ services:
     container_name: n8n_worker_1
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["worker", "--concurrency=5"]
+    command: ["worker", "--concurrency=10"]
     environment:
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - DB_TYPE=${DB_TYPE}
-      - DB_POSTGRESDB_HOST=${DB_POSTGRESDB_HOST}
-      - DB_POSTGRESDB_PORT=${DB_POSTGRESDB_PORT}
-      - DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE}
-      - DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER}
-      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      
+      # SQLite для метаданных N8N (общая база)
+      
       - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
       - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
       - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
@@ -363,6 +337,7 @@ services:
       - ./data/n8n:/home/node/.n8n
     networks:
       - n8n-internal
+      - backend  # Подключение к сети MariaDB
     healthcheck:
       test: ["CMD-SHELL", "ps aux | grep -v grep | grep worker || exit 1"]
       interval: 30s
@@ -375,20 +350,15 @@ services:
     container_name: n8n_worker_2
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["worker", "--concurrency=5"]
+    command: ["worker", "--concurrency=10"]
     environment:
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      - DB_TYPE=${DB_TYPE}
-      - DB_POSTGRESDB_HOST=${DB_POSTGRESDB_HOST}
-      - DB_POSTGRESDB_PORT=${DB_POSTGRESDB_PORT}
-      - DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE}
-      - DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER}
-      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      
+      # SQLite для метаданных N8N (общая база)
+      
       - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
       - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
       - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
@@ -404,6 +374,7 @@ services:
       - ./data/n8n:/home/node/.n8n
     networks:
       - n8n-internal
+      - backend  # Подключение к сети MariaDB
     healthcheck:
       test: ["CMD-SHELL", "ps aux | grep -v grep | grep worker || exit 1"]
       interval: 30s
@@ -411,24 +382,32 @@ services:
       retries: 3
 
 networks:
+  # Внутренняя сеть для N8N и Redis
   n8n-internal:
     driver: bridge
+  
+  # Внешняя сеть для Traefik
   proxy:
     external: true
     name: proxy
+    
+  # Сеть для подключения к MariaDB
+  backend:
+    external: true
+    name: backend
 
 volumes:
-  postgres_data:
   redis_data:
   n8n_data:
 EOF
 
-    print_success "docker-compose.yml создан без deprecated параметров"
+    print_success "docker-compose.yml создан для работы с внешней MariaDB"
+    print_status "N8N подключен к сетям: proxy (Traefik) + backend (MariaDB)"
 }
 
-# Создание скрипта для управления с дополнительными командами
+# Создание расширенного скрипта управления
 create_management_script() {
-    print_status "Создание расширенного скрипта управления..."
+    print_status "Создание скрипта управления..."
     
     cat > manage.sh << 'EOF'
 #!/bin/bash
@@ -459,14 +438,20 @@ show_help() {
     echo "Использование: $0 [КОМАНДА]"
     echo ""
     echo "Команды:"
-    echo "  start         Запустить все сервисы"
-    echo "  stop          Остановить все сервисы"
-    echo "  restart       Перезапустить все сервисы"
+    echo "  start         Запустить все сервисы N8N"
+    echo "  stop          Остановить все сервисы N8N"
+    echo "  restart       Перезапустить все сервисы N8N"
     echo "  logs          Показать логи всех сервисов"
+    echo "  logs-main     Показать логи основного N8N"
+    echo "  logs-editor   Показать логи редактора N8N"
+    echo "  logs-workers  Показать логи worker'ов"
+    echo "  logs-redis    Показать логи Redis"
     echo "  status        Показать статус сервисов"
     echo "  fix-perms     Исправить права доступа N8N"
-    echo "  clean-db      Очистить базу данных (ОСТОРОЖНО!)"
-    echo "  backup        Создать резервную копию"
+    echo "  scale [N]     Масштабировать до N worker'ов"
+    echo "  mariadb-test  Проверить подключение к MariaDB"
+    echo "  networks      Показать информацию о сетях"
+    echo "  backup        Создать резервную копию N8N данных"
     echo "  help          Показать эту справку"
 }
 
@@ -487,53 +472,129 @@ fix_permissions() {
         else
             chmod 600 ./data/n8n/config
         fi
-        print_success "Права доступа к файлу конфигурации исправлены"
     fi
     
     print_success "Права доступа исправлены"
 }
 
-clean_database() {
-    read -p "Вы уверены, что хотите очистить базу данных? (yes/no): " -r
-    if [[ $REPLY =~ ^yes$ ]]; then
-        print_warning "Остановка сервисов..."
-        docker compose down
-        print_warning "Очистка базы данных..."
-        sudo rm -rf ./data/postgres/*
-        sudo rm -rf ./data/n8n/database.sqlite
-        print_success "База данных очищена"
-        print_status "Запустите 'start' для пересоздания базы"
+test_mariadb_connection() {
+    print_status "Проверка подключения к MariaDB..."
+    
+    # Проверяем доступность контейнера wp-db
+    if docker ps --filter "name=wp-db" --format "{{.Names}}" | grep -q "wp-db"; then
+        print_success "Контейнер wp-db найден и запущен"
+        
+        # Проверяем доступность из сети backend
+        if docker run --rm --network backend alpine/curl -s --connect-timeout 5 wp-db:3306 2>/dev/null; then
+            print_success "MariaDB доступна по сети backend на порту 3306"
+        else
+            print_warning "MariaDB недоступна или не отвечает на порту 3306"
+        fi
     else
-        print_status "Операция отменена"
+        print_error "Контейнер wp-db не найден или не запущен"
+        print_status "Убедитесь что MariaDB контейнер запущен с именем 'wp-db'"
     fi
+    
+    # Показываем инструкции для настройки credentials
+    echo ""
+    print_status "Для подключения к MariaDB в N8N создайте MySQL credentials:"
+    print_status "  Host: wp-db"
+    print_status "  Port: 3306"
+    print_status "  Database: wordpress"
+    print_status "  User/Password: из вашего .env файла MariaDB"
+}
+
+show_networks() {
+    print_status "Информация о Docker сетях:"
+    echo ""
+    
+    print_status "Сеть proxy (Traefik):"
+    docker network inspect proxy 2>/dev/null | grep -A 10 "Containers" || print_warning "Сеть proxy не найдена"
+    
+    echo ""
+    print_status "Сеть backend (MariaDB):"
+    docker network inspect backend 2>/dev/null | grep -A 10 "Containers" || print_warning "Сеть backend не найдена"
+    
+    echo ""
+    print_status "Внутренняя сеть N8N:"
+    docker network inspect hook_n8n-internal 2>/dev/null | grep -A 10 "Containers" || print_warning "Внутренняя сеть N8N не найдена"
+}
+
+scale_workers() {
+    if [ -z "$1" ]; then
+        print_error "Укажите количество worker'ов (1-10)"
+        exit 1
+    fi
+    
+    if [ "$1" -lt 1 ] || [ "$1" -gt 10 ]; then
+        print_error "Количество worker'ов должно быть от 1 до 10"
+        exit 1
+    fi
+    
+    print_status "Масштабирование до $1 worker'ов..."
+    
+    # Останавливаем существующие worker'ы
+    docker compose stop n8n-worker-1 n8n-worker-2 2>/dev/null || true
+    
+    # Запускаем нужное количество
+    for i in $(seq 1 $1); do
+        if [ "$i" -le 2 ]; then
+            docker compose up -d n8n-worker-$i
+        else
+            # Для дополнительных worker'ов создаем временные
+            docker run -d --name "n8n_worker_$i" \
+                --restart unless-stopped \
+                --network hook_n8n-internal \
+                --network backend \
+                -e N8N_ENCRYPTION_KEY="$(grep N8N_ENCRYPTION_KEY .env | cut -d= -f2)" \
+                -e EXECUTIONS_MODE=queue \
+                -e QUEUE_BULL_REDIS_HOST=redis \
+                -e QUEUE_BULL_REDIS_PORT=6379 \
+                -v "$(pwd)/data/n8n:/home/node/.n8n" \
+                n8nio/n8n:latest worker --concurrency=10
+        fi
+    done
+    
+    print_success "Worker'ы масштабированы до $1 экземпляров"
 }
 
 backup_data() {
-    print_status "Создание резервной копии данных..."
+    print_status "Создание резервной копии данных N8N..."
     BACKUP_DIR="backup_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$BACKUP_DIR"
     
-    docker compose exec postgres pg_dump -U n8n n8n > "$BACKUP_DIR/database.sql" 2>/dev/null || print_warning "Не удалось создать дамп базы данных"
+    # Копируем данные N8N (SQLite база и настройки)
     cp -r data "$BACKUP_DIR/" 2>/dev/null || print_warning "Не удалось скопировать файлы данных"
     cp .env "$BACKUP_DIR/" 2>/dev/null || print_warning "Не удалось скопировать .env"
+    cp docker-compose.yml "$BACKUP_DIR/" 2>/dev/null || print_warning "Не удалось скопировать docker-compose.yml"
     
-    print_success "Резервная копия создана в $BACKUP_DIR"
+    print_success "Резервная копия N8N создана в $BACKUP_DIR"
+    print_status "Для MariaDB создавайте отдельную резервную копию"
 }
 
 start_services() {
-    print_status "Проверка сети proxy..."
-    if ! docker network ls | grep -q "proxy"; then
-        print_warning "Создание сети proxy..."
-        docker network create proxy
-    fi
+    print_status "Проверка сетей..."
+    
+    # Проверяем необходимые сети
+    for network in proxy backend; do
+        if ! docker network ls | grep -q "$network"; then
+            print_warning "Создание сети $network..."
+            docker network create "$network"
+        fi
+    done
     
     print_status "Запуск сервисов N8N..."
     if docker compose up -d; then
-        print_success "Сервисы запущены"
+        print_success "Сервисы N8N запущены"
         echo ""
         print_status "Доступ к сервисам:"
         print_status "  - Webhook endpoint: https://hook.autmatization-bot.ru/"
         print_status "  - Editor interface: https://n8n.autmatization-bot.ru/"
+        echo ""
+        print_status "Подключение к MariaDB:"
+        print_status "  - Host: wp-db"
+        print_status "  - Port: 3306"
+        print_status "  - Database: wordpress"
     else
         print_error "Ошибка запуска сервисов"
         exit 1
@@ -546,23 +607,45 @@ case "$1" in
         ;;
     stop)
         docker compose down
-        print_success "Сервисы остановлены"
+        print_success "Сервисы N8N остановлены"
         ;;
     restart)
         docker compose restart
-        print_success "Сервисы перезапущены"
+        print_success "Сервисы N8N перезапущены"
         ;;
     logs)
         docker compose logs -f --tail=100
         ;;
+    logs-main)
+        docker compose logs -f --tail=100 n8n-main
+        ;;
+    logs-editor)
+        docker compose logs -f --tail=100 n8n-editor
+        ;;
+    logs-workers)
+        docker compose logs -f --tail=100 n8n-worker-1 n8n-worker-2
+        ;;
+    logs-redis)
+        docker compose logs -f --tail=100 redis
+        ;;
     status)
+        print_status "Статус сервисов N8N:"
         docker compose ps
+        echo ""
+        print_status "Использование ресурсов:"
+        docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" $(docker compose ps -q) 2>/dev/null
         ;;
     fix-perms)
         fix_permissions
         ;;
-    clean-db)
-        clean_database
+    scale)
+        scale_workers "$2"
+        ;;
+    mariadb-test)
+        test_mariadb_connection
+        ;;
+    networks)
+        show_networks
         ;;
     backup)
         backup_data
@@ -582,88 +665,25 @@ EOF
     print_success "Расширенный скрипт управления создан (manage.sh)"
 }
 
-# Исправление прав доступа к файлам N8N
-fix_n8n_permissions() {
-    print_status "Исправление прав доступа к файлам N8N..."
+# Создание README с инструкциями для MariaDB
+create_readme() {
+    print_status "Создание README файла..."
     
-    if command -v sudo &> /dev/null; then
-        sudo chown -R 1000:1000 ./data/n8n 2>/dev/null || chown -R 1000:1000 ./data/n8n
-        sudo chmod -R 755 ./data/n8n 2>/dev/null || chmod -R 755 ./data/n8n
-    else
-        chown -R 1000:1000 ./data/n8n
-        chmod -R 755 ./data/n8n
-    fi
-    
-    if [ -f "./data/n8n/config" ]; then
-        if command -v sudo &> /dev/null; then
-            sudo chmod 600 ./data/n8n/config 2>/dev/null || chmod 600 ./data/n8n/config
-        else
-            chmod 600 ./data/n8n/config
-        fi
-        print_success "Права доступа к файлу конфигурации исправлены"
-    fi
-    
-    print_success "Права доступа исправлены"
-}
+    cat > README.md << 'EOF'
+# N8N с Redis в режиме очереди + MariaDB интеграция
 
-# Запуск сервисов
-start_services() {
-    print_status "Запуск сервисов N8N..."
-    if docker compose up -d; then
-        print_success "Сервисы запущены успешно!"
-        echo ""
-        print_status "Доступ к сервисам:"
-        print_status "  - Webhook endpoint: https://hook.autmatization-bot.ru/"
-        print_status "  - Editor interface: https://n8n.autmatization-bot.ru/"
-        echo ""
-        print_status "Мониторинг сервисов:"
-        print_status "  - Статус: ./manage.sh status"
-        print_status "  - Логи: ./manage.sh logs"
-        print_status "  - Очистка БД при ошибках миграции: ./manage.sh clean-db"
-    else
-        print_error "Ошибка при запуске сервисов"
-        exit 1
-    fi
-}
+Этот проект развертывает N8N с поддержкой масштабирования через Redis и интеграцию с внешней MariaDB.
 
-# Основная функция
-main() {
-    print_status "Установка N8N с Redis в режиме очереди для сети proxy - ИСПРАВЛЕННАЯ ВЕРСИЯ"
-    echo ""
-    
-    check_dependencies
-    check_proxy_network
-    configure_redis_sysctl
-    create_directories
-    create_env_file
-    create_docker_compose
-    create_management_script
-    fix_n8n_permissions
-    
-    echo ""
-    print_success "Установка завершена!"
-    echo ""
-    print_status "Исправления в этой версии:"
-    print_status "  ✓ Удален устаревший параметр 'version' из docker-compose.yml"
-    print_status "  ✓ Настроен vm.overcommit_memory для Redis"
-    print_status "  ✓ Добавлены современные переменные N8N (убирают warnings)"
-    print_status "  ✓ Исправлена конфигурация N8N Editor"
-    print_status "  ✓ Добавлена команда для очистки БД при ошибках миграции"
-    echo ""
-    print_status "Структура проекта создана в папке: $(pwd)"
-    echo ""
-    
-    read -p "Запустить сервисы сейчас? (y/n): " -r
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo ""
-        start_services
-    else
-        print_status "Сервисы не запущены. Команды для управления:"
-        print_status "  ./manage.sh start     # Запуск сервисов"
-        print_status "  ./manage.sh clean-db  # Очистка БД при ошибках"
-        print_status "  ./manage.sh help      # Все команды"
-    fi
-}
+## Архитектура
 
-# Запуск основной функции
-main "$@"
+- **N8N Main**: Webhook processor (hook.autmatization-bot.ru)
+- **N8N Editor**: Редактор workflow (n8n.autmatization-bot.ru)
+- **N8N Workers**: 2+ экземпляра для обработки задач из Redis очереди
+- **Redis**: Очередь задач для масштабирования
+- **SQLite**: Метаданные N8N (вместо PostgreSQL)
+- **MariaDB**: Внешняя база данных (контейнер wp-db)
+
+## Быстрый старт
+
+1. Убедитесь, что Traefik и MariaDB уже запущены
+2. Запустите установочный скрипт:
