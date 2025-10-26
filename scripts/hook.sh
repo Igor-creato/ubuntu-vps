@@ -59,6 +59,7 @@ check_proxy_network() {
     fi
 }
 
+
 # Генерация безопасного пароля
 generate_password() {
     openssl rand -base64 32 | tr -d "=+/" | cut -c1-25
@@ -229,15 +230,11 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-      
-      # Webhook роутер (hook.autmatization-bot.ru)
-      - "traefik.http.routers.n8n-webhook.rule=Host(\`${N8N_HOST}\`)"
+      - "traefik.http.routers.n8n-webhook.rule=Host(`${N8N_HOST}`)"
       - "traefik.http.routers.n8n-webhook.entrypoints=websecure"
       - "traefik.http.routers.n8n-webhook.tls.certresolver=letsencrypt"
       - "traefik.http.routers.n8n-webhook.service=n8n-webhook"
       - "traefik.http.services.n8n-webhook.loadbalancer.server.port=5678"
-      
-      # Middleware для webhook
       - "traefik.http.routers.n8n-webhook.middlewares=n8n-webhook-headers"
       - "traefik.http.middlewares.n8n-webhook-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
       - "traefik.http.middlewares.n8n-webhook-headers.headers.customrequestheaders.X-Forwarded-Host=${N8N_HOST}"
@@ -286,15 +283,11 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-      
-      # Editor роутер (n8n.autmatization-bot.ru)
-      - "traefik.http.routers.n8n-editor.rule=Host(\`${N8N_EDITOR_HOST}\`)"
+      - "traefik.http.routers.n8n-editor.rule=Host(`${N8N_EDITOR_HOST}`)"
       - "traefik.http.routers.n8n-editor.entrypoints=websecure"
       - "traefik.http.routers.n8n-editor.tls.certresolver=letsencrypt"
       - "traefik.http.routers.n8n-editor.service=n8n-editor"
       - "traefik.http.services.n8n-editor.loadbalancer.server.port=5678"
-      
-      # Middleware для editor
       - "traefik.http.routers.n8n-editor.middlewares=n8n-editor-headers"
       - "traefik.http.middlewares.n8n-editor-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
       - "traefik.http.middlewares.n8n-editor-headers.headers.customrequestheaders.X-Forwarded-Host=${N8N_EDITOR_HOST}"
@@ -361,6 +354,7 @@ EOF
 
     print_success "docker-compose.yml создан для сети proxy"
 }
+
 
 # Создание скрипта для управления
 create_management_script() {
