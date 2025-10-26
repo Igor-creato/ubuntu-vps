@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Скрипт для создания и запуска N8N с Redis в режиме очереди через Traefik
-# Настроен для работы с сетью proxy
+# Настроен для работы с сетью proxy - ИСПРАВЛЕННАЯ ВЕРСИЯ
 
 set -e
 
@@ -59,6 +59,26 @@ check_proxy_network() {
     fi
 }
 
+# Настройка системных параметров Redis
+configure_redis_sysctl() {
+    print_status "Настройка системных параметров для Redis..."
+    
+    # Проверка и настройка vm.overcommit_memory
+    current_overcommit=$(sysctl -n vm.overcommit_memory 2>/dev/null || echo "0")
+    if [ "$current_overcommit" != "1" ]; then
+        print_warning "Настройка vm.overcommit_memory для Redis..."
+        if command -v sudo &> /dev/null; then
+            sudo sysctl vm.overcommit_memory=1
+            echo "vm.overcommit_memory = 1" | sudo tee -a /etc/sysctl.conf >/dev/null
+        else
+            sysctl vm.overcommit_memory=1 2>/dev/null || print_warning "Не удалось настроить vm.overcommit_memory"
+        fi
+        print_success "Системные параметры Redis настроены"
+    else
+        print_success "Системные параметры Redis уже настроены"
+    fi
+}
+
 # Генерация безопасного пароля
 generate_password() {
     openssl rand -base64 32 | tr -d "=+/" | cut -c1-25
@@ -85,7 +105,7 @@ create_directories() {
     print_success "Структура папок создана в $(pwd)"
 }
 
-# Создание .env файла
+# Создание .env файла с исправленными параметрами
 create_env_file() {
     print_status "Создание файла конфигурации .env..."
     
@@ -125,11 +145,18 @@ QUEUE_BULL_REDIS_HOST=redis
 QUEUE_BULL_REDIS_PORT=6379
 QUEUE_BULL_REDIS_DB=0
 
+# N8N Современные настройки (устраняют warnings)
+N8N_RUNNERS_ENABLED=true
+OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+
 # Дополнительные настройки N8N
 N8N_METRICS=true
 N8N_LOG_LEVEL=info
 N8N_GRACEFUL_SHUTDOWN_TIMEOUT=30
 QUEUE_HEALTH_CHECK_ACTIVE=true
+N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
 
 # Таймзона
 GENERIC_TIMEZONE=Europe/Moscow
@@ -146,12 +173,12 @@ EOF
     print_warning "N8N ключ шифрования: $N8N_ENCRYPTION_KEY"
 }
 
-# Создание docker-compose.yml для работы с сетью proxy
+# Создание исправленного docker-compose.yml
 create_docker_compose() {
-    print_status "Создание docker-compose.yml для сети proxy..."
+    print_status "Создание исправленного docker-compose.yml..."
     
     cat > docker-compose.yml << 'EOF'
-
+# Удалена устаревшая строка version (Docker Compose v2+)
 services:
   # PostgreSQL база данных
   postgres:
@@ -172,7 +199,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # Redis для очередей
+  # Redis для очередей с исправленными настройками
   redis:
     image: redis:7-alpine
     container_name: n8n_redis
@@ -182,6 +209,8 @@ services:
       - ./data/redis:/data
     networks:
       - n8n-internal
+    sysctls:
+      - net.core.somaxconn=1024
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -214,13 +243,17 @@ services:
       - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
       - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
       - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
+      - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED}
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=${OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=${N8N_BLOCK_ENV_ACCESS_IN_NODE}
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=${N8N_GIT_NODE_DISABLE_BARE_REPOS}
       - N8N_METRICS=${N8N_METRICS}
       - N8N_LOG_LEVEL=${N8N_LOG_LEVEL}
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
       - QUEUE_HEALTH_CHECK_ACTIVE=${QUEUE_HEALTH_CHECK_ACTIVE}
       - N8N_ENDPOINT_WEBHOOK=${N8N_ENDPOINT_WEBHOOK}
       - N8N_ENDPOINT_WEBHOOK_TEST=${N8N_ENDPOINT_WEBHOOK_TEST}
-      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
     volumes:
       - ./data/n8n:/home/node/.n8n
     networks:
@@ -240,7 +273,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # N8N Editor экземпляр
+  # N8N Editor экземпляр (исправлен host)
   n8n-editor:
     image: n8nio/n8n:latest
     container_name: n8n_editor
@@ -266,12 +299,16 @@ services:
       - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
       - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
       - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
+      - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED}
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=${OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=${N8N_BLOCK_ENV_ACCESS_IN_NODE}
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=${N8N_GIT_NODE_DISABLE_BARE_REPOS}
       - N8N_METRICS=${N8N_METRICS}
       - N8N_LOG_LEVEL=${N8N_LOG_LEVEL}
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
       - QUEUE_HEALTH_CHECK_ACTIVE=${QUEUE_HEALTH_CHECK_ACTIVE}
       - N8N_DISABLE_PRODUCTION_MAIN_PROCESS=true
-      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
     volumes:
       - ./data/n8n:/home/node/.n8n
     networks:
@@ -314,11 +351,14 @@ services:
       - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
       - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
       - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
+      - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=${N8N_BLOCK_ENV_ACCESS_IN_NODE}
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=${N8N_GIT_NODE_DISABLE_BARE_REPOS}
       - N8N_LOG_LEVEL=${N8N_LOG_LEVEL}
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
       - QUEUE_HEALTH_CHECK_ACTIVE=${QUEUE_HEALTH_CHECK_ACTIVE}
       - N8N_GRACEFUL_SHUTDOWN_TIMEOUT=${N8N_GRACEFUL_SHUTDOWN_TIMEOUT}
-      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
     volumes:
       - ./data/n8n:/home/node/.n8n
     networks:
@@ -352,11 +392,14 @@ services:
       - QUEUE_BULL_REDIS_HOST=${QUEUE_BULL_REDIS_HOST}
       - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
       - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
+      - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=${N8N_BLOCK_ENV_ACCESS_IN_NODE}
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=${N8N_GIT_NODE_DISABLE_BARE_REPOS}
       - N8N_LOG_LEVEL=${N8N_LOG_LEVEL}
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
       - QUEUE_HEALTH_CHECK_ACTIVE=${QUEUE_HEALTH_CHECK_ACTIVE}
       - N8N_GRACEFUL_SHUTDOWN_TIMEOUT=${N8N_GRACEFUL_SHUTDOWN_TIMEOUT}
-      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
     volumes:
       - ./data/n8n:/home/node/.n8n
     networks:
@@ -380,12 +423,12 @@ volumes:
   n8n_data:
 EOF
 
-    print_success "docker-compose.yml создан для сети proxy"
+    print_success "docker-compose.yml создан без deprecated параметров"
 }
 
-# Создание скрипта для управления
+# Создание скрипта для управления с дополнительными командами
 create_management_script() {
-    print_status "Создание скрипта управления..."
+    print_status "Создание расширенного скрипта управления..."
     
     cat > manage.sh << 'EOF'
 #!/bin/bash
@@ -422,23 +465,59 @@ show_help() {
     echo "  logs          Показать логи всех сервисов"
     echo "  status        Показать статус сервисов"
     echo "  fix-perms     Исправить права доступа N8N"
+    echo "  clean-db      Очистить базу данных (ОСТОРОЖНО!)"
+    echo "  backup        Создать резервную копию"
     echo "  help          Показать эту справку"
 }
 
 fix_permissions() {
     print_status "Исправление прав доступа к файлам N8N..."
     
-    # Создание директорий с правильными правами
-    sudo chown -R 1000:1000 ./data/n8n
-    sudo chmod -R 755 ./data/n8n
+    if command -v sudo &> /dev/null; then
+        sudo chown -R 1000:1000 ./data/n8n 2>/dev/null || chown -R 1000:1000 ./data/n8n
+        sudo chmod -R 755 ./data/n8n 2>/dev/null || chmod -R 755 ./data/n8n
+    else
+        chown -R 1000:1000 ./data/n8n
+        chmod -R 755 ./data/n8n
+    fi
     
-    # Если файл конфигурации существует, исправляем его права
     if [ -f "./data/n8n/config" ]; then
-        sudo chmod 600 ./data/n8n/config
+        if command -v sudo &> /dev/null; then
+            sudo chmod 600 ./data/n8n/config 2>/dev/null || chmod 600 ./data/n8n/config
+        else
+            chmod 600 ./data/n8n/config
+        fi
         print_success "Права доступа к файлу конфигурации исправлены"
     fi
     
     print_success "Права доступа исправлены"
+}
+
+clean_database() {
+    read -p "Вы уверены, что хотите очистить базу данных? (yes/no): " -r
+    if [[ $REPLY =~ ^yes$ ]]; then
+        print_warning "Остановка сервисов..."
+        docker compose down
+        print_warning "Очистка базы данных..."
+        sudo rm -rf ./data/postgres/*
+        sudo rm -rf ./data/n8n/database.sqlite
+        print_success "База данных очищена"
+        print_status "Запустите 'start' для пересоздания базы"
+    else
+        print_status "Операция отменена"
+    fi
+}
+
+backup_data() {
+    print_status "Создание резервной копии данных..."
+    BACKUP_DIR="backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    
+    docker compose exec postgres pg_dump -U n8n n8n > "$BACKUP_DIR/database.sql" 2>/dev/null || print_warning "Не удалось создать дамп базы данных"
+    cp -r data "$BACKUP_DIR/" 2>/dev/null || print_warning "Не удалось скопировать файлы данных"
+    cp .env "$BACKUP_DIR/" 2>/dev/null || print_warning "Не удалось скопировать .env"
+    
+    print_success "Резервная копия создана в $BACKUP_DIR"
 }
 
 start_services() {
@@ -482,6 +561,12 @@ case "$1" in
     fix-perms)
         fix_permissions
         ;;
+    clean-db)
+        clean_database
+        ;;
+    backup)
+        backup_data
+        ;;
     help|--help|-h|"")
         show_help
         ;;
@@ -494,14 +579,13 @@ esac
 EOF
 
     chmod +x manage.sh
-    print_success "Скрипт управления создан (manage.sh)"
+    print_success "Расширенный скрипт управления создан (manage.sh)"
 }
 
 # Исправление прав доступа к файлам N8N
 fix_n8n_permissions() {
     print_status "Исправление прав доступа к файлам N8N..."
     
-    # Создание директорий с правильными правами
     if command -v sudo &> /dev/null; then
         sudo chown -R 1000:1000 ./data/n8n 2>/dev/null || chown -R 1000:1000 ./data/n8n
         sudo chmod -R 755 ./data/n8n 2>/dev/null || chmod -R 755 ./data/n8n
@@ -510,7 +594,6 @@ fix_n8n_permissions() {
         chmod -R 755 ./data/n8n
     fi
     
-    # Если файл конфигурации существует, исправляем его права
     if [ -f "./data/n8n/config" ]; then
         if command -v sudo &> /dev/null; then
             sudo chmod 600 ./data/n8n/config 2>/dev/null || chmod 600 ./data/n8n/config
@@ -533,8 +616,10 @@ start_services() {
         print_status "  - Webhook endpoint: https://hook.autmatization-bot.ru/"
         print_status "  - Editor interface: https://n8n.autmatization-bot.ru/"
         echo ""
-        print_status "Проверьте статус сервисов: ./manage.sh status"
-        print_status "Просмотр логов: ./manage.sh logs"
+        print_status "Мониторинг сервисов:"
+        print_status "  - Статус: ./manage.sh status"
+        print_status "  - Логи: ./manage.sh logs"
+        print_status "  - Очистка БД при ошибках миграции: ./manage.sh clean-db"
     else
         print_error "Ошибка при запуске сервисов"
         exit 1
@@ -543,21 +628,27 @@ start_services() {
 
 # Основная функция
 main() {
-    print_status "Установка N8N с Redis в режиме очереди для сети proxy"
+    print_status "Установка N8N с Redis в режиме очереди для сети proxy - ИСПРАВЛЕННАЯ ВЕРСИЯ"
     echo ""
     
     check_dependencies
     check_proxy_network
+    configure_redis_sysctl
     create_directories
     create_env_file
     create_docker_compose
     create_management_script
-    
-    # ДОБАВЛЯЕМ ИСПРАВЛЕНИЕ ПРАВ ДОСТУПА ПЕРЕД ЗАПУСКОМ
     fix_n8n_permissions
     
     echo ""
     print_success "Установка завершена!"
+    echo ""
+    print_status "Исправления в этой версии:"
+    print_status "  ✓ Удален устаревший параметр 'version' из docker-compose.yml"
+    print_status "  ✓ Настроен vm.overcommit_memory для Redis"
+    print_status "  ✓ Добавлены современные переменные N8N (убирают warnings)"
+    print_status "  ✓ Исправлена конфигурация N8N Editor"
+    print_status "  ✓ Добавлена команда для очистки БД при ошибках миграции"
     echo ""
     print_status "Структура проекта создана в папке: $(pwd)"
     echo ""
@@ -567,8 +658,10 @@ main() {
         echo ""
         start_services
     else
-        print_status "Сервисы не запущены. Используйте './manage.sh start' для запуска."
-        print_status "Если возникнут проблемы с правами: './manage.sh fix-perms'"
+        print_status "Сервисы не запущены. Команды для управления:"
+        print_status "  ./manage.sh start     # Запуск сервисов"
+        print_status "  ./manage.sh clean-db  # Очистка БД при ошибках"
+        print_status "  ./manage.sh help      # Все команды"
     fi
 }
 
