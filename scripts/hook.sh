@@ -666,6 +666,7 @@ EOF
 }
 
 # Создание README с инструкциями для MariaDB
+# Создание README с инструкциями для MariaDB
 create_readme() {
     print_status "Создание README файла..."
     
@@ -686,4 +687,43 @@ create_readme() {
 ## Быстрый старт
 
 1. Убедитесь, что Traefik и MariaDB уже запущены
-2. Запустите установочный скрипт:
+2. Запустите установочный скрипт
+3. Настройте подключение к MariaDB в N8N UI
+
+## Управление
+
+Основные команды для управления сервисами:
+- start: Запуск сервисов N8N
+- stop: Остановка сервисов N8N
+- logs: Просмотр логов
+- mariadb-test: Проверка подключения к MariaDB
+- status: Статус сервисов
+
+## Настройка подключения к MariaDB
+
+В N8N Editor создайте MySQL credentials:
+- Host: wp-db
+- Port: 3306
+- Database: wordpress
+- User: ваш MySQL пользователь
+- Password: ваш MySQL пароль
+
+## Docker сети
+
+- proxy: Для Traefik (внешняя)
+- backend: Для MariaDB (внешняя) 
+- n8n-internal: Внутренняя сеть N8N и Redis
+
+## Масштабирование
+
+Увеличить количество worker'ов:
+./manage.sh scale 5
+
+## Мониторинг
+
+Проверка статуса всех сервисов:
+./manage.sh status
+EOF
+
+    print_success "README.md создан"
+}
