@@ -39,53 +39,47 @@ mkdir -p hook
 cd hook
 mkdir -p data/n8n data/redis data/postgres
 
-# Генерация ключей и паролей
-KEY=$(openssl rand -base64 32)
+# Генерация ключей и паролей (без специальных символов для sed)
+KEY=$(openssl rand -base64 32 | tr -d "=+/")
 PG_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 
-# Создание .env с PostgreSQL
+# Создание .env с PostgreSQL построчно (избегаем sed)
 print_status "Создание .env..."
-cat > .env << 'ENVFILE'
-# N8N настройки
-N8N_ENCRYPTION_KEY=PLACEHOLDER_KEY
-EXECUTIONS_MODE=queue
-N8N_HOST=hook.autmatization-bot.ru
-N8N_PROTOCOL=https
-WEBHOOK_URL=https://hook.autmatization-bot.ru/
-N8N_EDITOR_HOST=n8n.autmatization-bot.ru
-
-# Redis настройки
-QUEUE_BULL_REDIS_HOST=redis
-QUEUE_BULL_REDIS_PORT=6379
-QUEUE_BULL_REDIS_DB=0
-
-# PostgreSQL для n8n метаданных
-DB_TYPE=postgresdb
-DB_POSTGRESDB_HOST=postgres
-DB_POSTGRESDB_PORT=5432
-DB_POSTGRESDB_DATABASE=n8n
-DB_POSTGRESDB_USER=n8n
-DB_POSTGRESDB_PASSWORD=PLACEHOLDER_PG_PASSWORD
-
-# PostgreSQL переменные для контейнера
-POSTGRES_DB=n8n
-POSTGRES_USER=n8n
-POSTGRES_PASSWORD=PLACEHOLDER_PG_PASSWORD
-
-# N8N современные настройки
-N8N_RUNNERS_ENABLED=true
-N8N_BLOCK_ENV_ACCESS_IN_NODE=false
-N8N_GIT_NODE_DISABLE_BARE_REPOS=true
-N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
-N8N_METRICS=true
-N8N_LOG_LEVEL=info
-GENERIC_TIMEZONE=Europe/Moscow
-QUEUE_HEALTH_CHECK_ACTIVE=true
-ENVFILE
-
-# Заменяем placeholders на реальные значения
-sed -i "s/PLACEHOLDER_KEY/$KEY/" .env
-sed -i "s/PLACEHOLDER_PG_PASSWORD/$PG_PASSWORD/g" .env
+echo "# N8N настройки" > .env
+echo "N8N_ENCRYPTION_KEY=$KEY" >> .env
+echo "EXECUTIONS_MODE=queue" >> .env
+echo "N8N_HOST=hook.autmatization-bot.ru" >> .env
+echo "N8N_PROTOCOL=https" >> .env
+echo "WEBHOOK_URL=https://hook.autmatization-bot.ru/" >> .env
+echo "N8N_EDITOR_HOST=n8n.autmatization-bot.ru" >> .env
+echo "" >> .env
+echo "# Redis настройки" >> .env
+echo "QUEUE_BULL_REDIS_HOST=redis" >> .env
+echo "QUEUE_BULL_REDIS_PORT=6379" >> .env
+echo "QUEUE_BULL_REDIS_DB=0" >> .env
+echo "" >> .env
+echo "# PostgreSQL для n8n метаданных" >> .env
+echo "DB_TYPE=postgresdb" >> .env
+echo "DB_POSTGRESDB_HOST=postgres" >> .env
+echo "DB_POSTGRESDB_PORT=5432" >> .env
+echo "DB_POSTGRESDB_DATABASE=n8n" >> .env
+echo "DB_POSTGRESDB_USER=n8n" >> .env
+echo "DB_POSTGRESDB_PASSWORD=$PG_PASSWORD" >> .env
+echo "" >> .env
+echo "# PostgreSQL переменные для контейнера" >> .env
+echo "POSTGRES_DB=n8n" >> .env
+echo "POSTGRES_USER=n8n" >> .env
+echo "POSTGRES_PASSWORD=$PG_PASSWORD" >> .env
+echo "" >> .env
+echo "# N8N современные настройки" >> .env
+echo "N8N_RUNNERS_ENABLED=true" >> .env
+echo "N8N_BLOCK_ENV_ACCESS_IN_NODE=false" >> .env
+echo "N8N_GIT_NODE_DISABLE_BARE_REPOS=true" >> .env
+echo "N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true" >> .env
+echo "N8N_METRICS=true" >> .env
+echo "N8N_LOG_LEVEL=info" >> .env
+echo "GENERIC_TIMEZONE=Europe/Moscow" >> .env
+echo "QUEUE_HEALTH_CHECK_ACTIVE=true" >> .env
 
 # Создание docker-compose с PostgreSQL
 print_status "Создание docker-compose.yml с PostgreSQL..."
@@ -328,8 +322,8 @@ case "$1" in
         docker compose up -d
         print_success "N8N запущен!"
         echo ""
-        echo "🔗 Webhook: https://hook.autmatization-bot.ru/"
-        echo "✏️ Editor: https://n8n.autmatization-bot.ru/"
+        echo "Webhook: https://hook.autmatization-bot.ru/"
+        echo "Editor: https://n8n.autmatization-bot.ru/"
         echo ""
         print_status "Для MariaDB используйте host: wp-db"
         ;;
@@ -388,8 +382,8 @@ chmod -R 755 ./data/n8n 2>/dev/null || sudo chmod -R 755 ./data/n8n 2>/dev/null 
 echo ""
 print_success "Установка завершена!"
 echo ""
-echo "🔑 N8N ключ шифрования: $KEY"
-echo "🗄️ PostgreSQL пароль: $PG_PASSWORD"
+echo "N8N ключ шифрования: $KEY"
+echo "PostgreSQL пароль: $PG_PASSWORD"
 echo ""
 print_warning "Сохраните эти пароли в безопасном месте!"
 echo ""
@@ -420,8 +414,8 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo ""
     print_success "N8N успешно запущен с PostgreSQL!"
     echo ""
-    echo "🔗 Webhook: https://hook.autmatization-bot.ru/"
-    echo "✏️ Editor: https://n8n.autmatization-bot.ru/"
+    echo "Webhook: https://hook.autmatization-bot.ru/"
+    echo "Editor: https://n8n.autmatization-bot.ru/"
     echo ""
     print_status "Настройки для MariaDB в N8N:"
     print_status "   Host: wp-db"
