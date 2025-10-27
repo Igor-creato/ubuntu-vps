@@ -4,19 +4,21 @@
 
 set -e
 
-# Цвета для вывода
+# Цвета для вывода (определяем в самом начале)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# Функции для цветного вывода (определяем сразу после цветов)
 print_status() { echo -e "${BLUE}[INFO]${NC} $1"; }
 print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-echo "🚀 Установка N8N с PostgreSQL и Redis..."
+# Теперь можно использовать функции
+print_status "Установка N8N с PostgreSQL и Redis..."
 
 # Проверка Docker
 if ! command -v docker &> /dev/null; then
@@ -27,12 +29,12 @@ fi
 print_success "Docker найден"
 
 # Создание сетей
-echo "📡 Создание сетей..."
+print_status "Создание сетей..."
 docker network create proxy 2>/dev/null || true
 docker network create backend 2>/dev/null || true
 
 # Создание папок
-echo "📁 Создание папок..."
+print_status "Создание папок..."
 mkdir -p hook
 cd hook
 mkdir -p data/n8n data/redis data/postgres
@@ -42,45 +44,51 @@ KEY=$(openssl rand -base64 32)
 PG_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 
 # Создание .env с PostgreSQL
-echo "⚙️ Создание .env..."
-echo "# N8N настройки" > .env
-echo "N8N_ENCRYPTION_KEY=$KEY" >> .env
-echo "EXECUTIONS_MODE=queue" >> .env
-echo "N8N_HOST=hook.autmatization-bot.ru" >> .env
-echo "N8N_PROTOCOL=https" >> .env
-echo "WEBHOOK_URL=https://hook.autmatization-bot.ru/" >> .env
-echo "N8N_EDITOR_HOST=n8n.autmatization-bot.ru" >> .env
-echo "" >> .env
-echo "# Redis настройки" >> .env
-echo "QUEUE_BULL_REDIS_HOST=redis" >> .env
-echo "QUEUE_BULL_REDIS_PORT=6379" >> .env
-echo "QUEUE_BULL_REDIS_DB=0" >> .env
-echo "" >> .env
-echo "# PostgreSQL для n8n метаданных" >> .env
-echo "DB_TYPE=postgresdb" >> .env
-echo "DB_POSTGRESDB_HOST=postgres" >> .env
-echo "DB_POSTGRESDB_PORT=5432" >> .env
-echo "DB_POSTGRESDB_DATABASE=n8n" >> .env
-echo "DB_POSTGRESDB_USER=n8n" >> .env
-echo "DB_POSTGRESDB_PASSWORD=$PG_PASSWORD" >> .env
-echo "" >> .env
-echo "# PostgreSQL переменные для контейнера" >> .env
-echo "POSTGRES_DB=n8n" >> .env
-echo "POSTGRES_USER=n8n" >> .env
-echo "POSTGRES_PASSWORD=$PG_PASSWORD" >> .env
-echo "" >> .env
-echo "# N8N современные настройки" >> .env
-echo "N8N_RUNNERS_ENABLED=true" >> .env
-echo "N8N_BLOCK_ENV_ACCESS_IN_NODE=false" >> .env
-echo "N8N_GIT_NODE_DISABLE_BARE_REPOS=true" >> .env
-echo "N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true" >> .env
-echo "N8N_METRICS=true" >> .env
-echo "N8N_LOG_LEVEL=info" >> .env
-echo "GENERIC_TIMEZONE=Europe/Moscow" >> .env
-echo "QUEUE_HEALTH_CHECK_ACTIVE=true" >> .env
+print_status "Создание .env..."
+cat > .env << 'ENVFILE'
+# N8N настройки
+N8N_ENCRYPTION_KEY=PLACEHOLDER_KEY
+EXECUTIONS_MODE=queue
+N8N_HOST=hook.autmatization-bot.ru
+N8N_PROTOCOL=https
+WEBHOOK_URL=https://hook.autmatization-bot.ru/
+N8N_EDITOR_HOST=n8n.autmatization-bot.ru
+
+# Redis настройки
+QUEUE_BULL_REDIS_HOST=redis
+QUEUE_BULL_REDIS_PORT=6379
+QUEUE_BULL_REDIS_DB=0
+
+# PostgreSQL для n8n метаданных
+DB_TYPE=postgresdb
+DB_POSTGRESDB_HOST=postgres
+DB_POSTGRESDB_PORT=5432
+DB_POSTGRESDB_DATABASE=n8n
+DB_POSTGRESDB_USER=n8n
+DB_POSTGRESDB_PASSWORD=PLACEHOLDER_PG_PASSWORD
+
+# PostgreSQL переменные для контейнера
+POSTGRES_DB=n8n
+POSTGRES_USER=n8n
+POSTGRES_PASSWORD=PLACEHOLDER_PG_PASSWORD
+
+# N8N современные настройки
+N8N_RUNNERS_ENABLED=true
+N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+N8N_METRICS=true
+N8N_LOG_LEVEL=info
+GENERIC_TIMEZONE=Europe/Moscow
+QUEUE_HEALTH_CHECK_ACTIVE=true
+ENVFILE
+
+# Заменяем placeholders на реальные значения
+sed -i "s/PLACEHOLDER_KEY/$KEY/" .env
+sed -i "s/PLACEHOLDER_PG_PASSWORD/$PG_PASSWORD/g" .env
 
 # Создание docker-compose с PostgreSQL
-echo "🐳 Создание docker-compose.yml с PostgreSQL..."
+print_status "Создание docker-compose.yml с PostgreSQL..."
 
 cat > docker-compose.yml << 'ENDFILE'
 services:
@@ -299,8 +307,8 @@ volumes:
   n8n_data:
 ENDFILE
 
-# Создание расширенного manage.sh
-echo "🛠️ Создание manage.sh..."
+# Создание manage.sh
+print_status "Создание manage.sh..."
 cat > manage.sh << 'MANAGESCRIPT'
 #!/bin/bash
 
@@ -354,16 +362,6 @@ case "$1" in
         print_status "Очередь Redis:"
         docker exec -it n8n_redis redis-cli LLEN bull:n8n:waiting 2>/dev/null || echo "Redis недоступен"
         ;;
-    db-reset)
-        print_warning "ВНИМАНИЕ: Это удалит все данные n8n PostgreSQL!"
-        read -p "Продолжить? (yes/no): " -r
-        if [[ $REPLY == "yes" ]]; then
-            docker compose stop n8n-main n8n-editor n8n-worker-1 n8n-worker-2
-            docker compose exec postgres psql -U n8n -d n8n -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
-            docker compose start n8n-main n8n-editor n8n-worker-1 n8n-worker-2
-            print_success "База данных n8n очищена"
-        fi
-        ;;
     *)
         echo "N8N с PostgreSQL управление:"
         echo ""
@@ -376,7 +374,6 @@ case "$1" in
         echo "  logs-workers  - Логи worker'ов"
         echo "  logs-postgres - Логи PostgreSQL"
         echo "  status        - Статус и очередь"
-        echo "  db-reset      - Сброс БД n8n (ОПАСНО!)"
         ;;
 esac
 MANAGESCRIPT
@@ -384,7 +381,7 @@ MANAGESCRIPT
 chmod +x manage.sh
 
 # Исправление прав
-echo "🔒 Исправление прав..."
+print_status "Исправление прав..."
 chown -R 1000:1000 ./data/n8n 2>/dev/null || sudo chown -R 1000:1000 ./data/n8n 2>/dev/null || true
 chmod -R 755 ./data/n8n 2>/dev/null || sudo chmod -R 755 ./data/n8n 2>/dev/null || true
 
@@ -404,7 +401,7 @@ echo "  ./manage.sh status    - Статус и очередь"
 echo ""
 
 # Проверка YAML синтаксиса
-echo "🔍 Проверка docker-compose.yml..."
+print_status "Проверка docker-compose.yml..."
 if docker compose config >/dev/null 2>&1; then
     print_success "docker-compose.yml синтаксис корректен"
 else
@@ -421,18 +418,18 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     docker compose up -d
     
     echo ""
-    print_success "✅ N8N успешно запущен с PostgreSQL!"
+    print_success "N8N успешно запущен с PostgreSQL!"
     echo ""
     echo "🔗 Webhook: https://hook.autmatization-bot.ru/"
     echo "✏️ Editor: https://n8n.autmatization-bot.ru/"
     echo ""
-    print_status "📋 Настройки для MariaDB в N8N:"
+    print_status "Настройки для MariaDB в N8N:"
     print_status "   Host: wp-db"
     print_status "   Port: 3306"
     print_status "   Database: wordpress"
     echo ""
-    print_status "🔧 Управление: ./manage.sh [команда]"
-    print_status "📊 Проверка очереди: ./manage.sh status"
+    print_status "Управление: ./manage.sh [команда]"
+    print_status "Проверка очереди: ./manage.sh status"
 else
     echo "N8N готов к запуску. Команда: ./manage.sh start"
 fi
