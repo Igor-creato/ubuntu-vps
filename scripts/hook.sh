@@ -31,7 +31,7 @@ print_success "Docker найден"
 # Создание сетей
 print_status "Создание сетей..."
 docker network create proxy 2>/dev/null || true
-docker network create backend 2>/dev/null || true
+docker network create wp-backend 2>/dev/null || true
 
 # Создание папок
 print_status "Создание папок..."
@@ -164,7 +164,7 @@ services:
     networks:
       - n8n-internal
       - proxy
-      - backend
+      - wp-backend
     labels:
       - traefik.enable=true
       - traefik.docker.network=proxy
@@ -212,7 +212,7 @@ services:
     networks:
       - n8n-internal
       - proxy
-      - backend
+      - wp-backend
     labels:
       - traefik.enable=true
       - traefik.docker.network=proxy
@@ -254,7 +254,7 @@ services:
       - ./data/n8n:/home/node/.n8n
     networks:
       - n8n-internal
-      - backend
+      - wp-backend
 
   n8n-worker-2:
     image: n8nio/n8n:latest
@@ -289,7 +289,7 @@ services:
       - ./data/n8n:/home/node/.n8n
     networks:
       - n8n-internal
-      - backend
+      - wp-backend
 
 networks:
   n8n-internal:
@@ -297,9 +297,9 @@ networks:
   proxy:
     external: true
     name: proxy
-  backend:
+  wp-backend:
     external: true
-    name: backend
+    name: wp-backend
 
 volumes:
   postgres_data:
