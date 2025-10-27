@@ -4,15 +4,27 @@
 
 set -e
 
+# Цвета для вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+print_status() { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
 echo "🚀 Установка N8N с PostgreSQL и Redis..."
 
 # Проверка Docker
 if ! command -v docker &> /dev/null; then
-    echo "❌ Docker не установлен"
+    print_error "Docker не установлен"
     exit 1
 fi
 
-echo "✅ Docker найден"
+print_success "Docker найден"
 
 # Создание сетей
 echo "📡 Создание сетей..."
@@ -377,7 +389,7 @@ chown -R 1000:1000 ./data/n8n 2>/dev/null || sudo chown -R 1000:1000 ./data/n8n 
 chmod -R 755 ./data/n8n 2>/dev/null || sudo chmod -R 755 ./data/n8n 2>/dev/null || true
 
 echo ""
-echo "✅ Установка завершена!"
+print_success "Установка завершена!"
 echo ""
 echo "🔑 N8N ключ шифрования: $KEY"
 echo "🗄️ PostgreSQL пароль: $PG_PASSWORD"
@@ -394,9 +406,9 @@ echo ""
 # Проверка YAML синтаксиса
 echo "🔍 Проверка docker-compose.yml..."
 if docker compose config >/dev/null 2>&1; then
-    echo "✅ docker-compose.yml синтаксис корректен"
+    print_success "docker-compose.yml синтаксис корректен"
 else
-    echo "❌ Ошибка в docker-compose.yml:"
+    print_error "Ошибка в docker-compose.yml:"
     docker compose config
     exit 1
 fi
