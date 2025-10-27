@@ -180,8 +180,10 @@ networks:
     driver: bridge
   proxy:
     external: true
+    name: proxy          # ← рекомендуется указывать явно (хотя и не обязательно, если имя совпадает)
   backend:
     external: true
+    name: wp-backend     # ← КЛЮЧЕВАЯ СТРОКА!
 ENDFILE
 
 # Создание manage.sh
