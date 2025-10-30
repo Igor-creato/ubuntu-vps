@@ -201,7 +201,6 @@ EOF
 
 echo -e "${YELLOW}Создание docker-compose.yml...${NC}"
 cat > docker-compose.yml << EOF
-version: '3.8'
 
 services:
   webhook-proxy:
