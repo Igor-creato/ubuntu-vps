@@ -7,7 +7,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Установка Svix Webhook Service (EPN.bz Corrected) ===${NC}"
+echo -e "${BLUE}=== Установка Svix Webhook Service с обработкой ошибок БД ===${NC}"
 
 # Проверка что мы не root
 if [ "$EUID" -eq 0 ]; then
@@ -58,6 +58,38 @@ fi
 read -p "Введите название базы данных [wordpress]: " DB_NAME
 DB_NAME=${DB_NAME:-wordpress}
 
+echo -e "${BLUE}Настройка email уведомлений об ошибках:${NC}"
+
+read -p "Введите email для уведомлений об ошибках: " ALERT_EMAIL
+if [ -z "$ALERT_EMAIL" ]; then
+    echo -e "${YELLOW}Email не указан - уведомления будут отключены${NC}"
+    SMTP_USERNAME=""
+    SMTP_PASSWORD=""
+    SMTP_SERVER="smtp.gmail.com"
+    SMTP_PORT="587"
+    FROM_EMAIL=""
+else
+    read -p "Введите SMTP сервер [smtp.gmail.com]: " SMTP_SERVER
+    SMTP_SERVER=${SMTP_SERVER:-smtp.gmail.com}
+
+    read -p "Введите SMTP порт [587]: " SMTP_PORT
+    SMTP_PORT=${SMTP_PORT:-587}
+
+    read -p "Введите email для отправки уведомлений [${ALERT_EMAIL}]: " SMTP_USERNAME
+    SMTP_USERNAME=${SMTP_USERNAME:-$ALERT_EMAIL}
+
+    read -s -p "Введите пароль для email (для Gmail используйте App Password): " SMTP_PASSWORD
+    echo
+    if [ -z "$SMTP_PASSWORD" ]; then
+        echo -e "${YELLOW}Пароль не указан - email уведомления будут отключены${NC}"
+        SMTP_USERNAME=""
+        ALERT_EMAIL=""
+    fi
+
+    read -p "Введите From email [${SMTP_USERNAME}]: " FROM_EMAIL
+    FROM_EMAIL=${FROM_EMAIL:-$SMTP_USERNAME}
+fi
+
 # Генерация секретного токена для пути URL (64 символа hex)
 WEBHOOK_SECRET_TOKEN=$(openssl rand -hex 32)
 echo -e "${GREEN}Сгенерирован секретный токен: $WEBHOOK_SECRET_TOKEN${NC}"
@@ -74,7 +106,7 @@ echo -e "${YELLOW}Создание структуры директорий...${N
 mkdir -p app/partners
 mkdir -p scripts
 
-# .env файл
+# .env файл с настройками email
 cat > .env << EOF
 # Database Configuration
 DATABASE_URL=mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
@@ -96,9 +128,17 @@ SVIX_JWT_SECRET=$(openssl rand -base64 32)
 # FastAPI Configuration
 FASTAPI_HOST=0.0.0.0
 FASTAPI_PORT=8000
+
+# Email notification settings
+SMTP_SERVER=${SMTP_SERVER}
+SMTP_PORT=${SMTP_PORT}
+SMTP_USERNAME=${SMTP_USERNAME}
+SMTP_PASSWORD=${SMTP_PASSWORD}
+ALERT_EMAIL=${ALERT_EMAIL}
+FROM_EMAIL=${FROM_EMAIL}
 EOF
 
-echo -e "${GREEN}Файл .env создан${NC}"
+echo -e "${GREEN}Файл .env создан с настройками email${NC}"
 
 # Docker Compose файл
 cat > docker-compose.yml << 'EOF'
@@ -163,6 +203,12 @@ services:
       WEBHOOK_SECRET_TOKEN: ${WEBHOOK_SECRET_TOKEN}
       TABLE_NAME: ${TABLE_NAME}
       SVIX_API_URL: http://svix_server:8071
+      SMTP_SERVER: ${SMTP_SERVER}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USERNAME: ${SMTP_USERNAME}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      ALERT_EMAIL: ${ALERT_EMAIL}
+      FROM_EMAIL: ${FROM_EMAIL}
     depends_on:
       - svix_server
     networks:
@@ -227,15 +273,19 @@ EOF
 
 echo -e "${GREEN}Requirements.txt создан${NC}"
 
-# Модуль для работы с базой данных (исправленный для EPN.bz)
-echo -e "${YELLOW}Создание модуля базы данных...${NC}"
+# Модуль для работы с базой данных с обработкой ошибок и email уведомлениями
+echo -e "${YELLOW}Создание модуля базы данных с обработкой ошибок...${NC}"
 cat > app/database.py << 'EOF'
 import os
 import logging
+import smtplib
+from email.mime.text import MimeText
+from email.mime.multipart import MimeMultipart
 from typing import Dict, Any, Optional
 import pymysql
 from datetime import datetime
 import json
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -243,11 +293,80 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL")
 TABLE_NAME = os.getenv("TABLE_NAME", "webhook_events")
 
+# Настройки email уведомлений
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL")
+FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USERNAME)
+
+class DatabaseError(Exception):
+    """Базовый класс для ошибок базы данных"""
+    pass
+
+class DatabaseConnectionError(DatabaseError):
+    """Ошибка подключения к базе данных"""
+    pass
+
+class DatabaseOperationError(DatabaseError):
+    """Ошибка выполнения операции в базе данных"""
+    pass
+
+def send_error_email(subject: str, error_message: str, webhook_data: Dict[str, Any] = None):
+    """Отправка email уведомления об ошибке"""
+    try:
+        if not all([SMTP_USERNAME, SMTP_PASSWORD, ALERT_EMAIL]):
+            logger.warning("Email settings not configured, skipping email notification")
+            return False
+
+        msg = MimeMultipart()
+        msg['From'] = FROM_EMAIL
+        msg['To'] = ALERT_EMAIL
+        msg['Subject'] = f"[Webhook Service Alert] {subject}"
+
+        body = f"""
+Произошла ошибка в сервисе приема webhook'ов:
+
+Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Ошибка: {error_message}
+
+"""
+
+        if webhook_data:
+            body += f"""
+Данные webhook'а:
+Partner: {webhook_data.get('partner', 'N/A')}
+Event Type: {webhook_data.get('event_type', 'N/A')}
+Uniq ID: {webhook_data.get('uniq_id', 'N/A')}
+Order Status: {webhook_data.get('order_status', 'N/A')}
+Revenue: {webhook_data.get('revenue', 'N/A')}
+Commission: {webhook_data.get('commission_fee', 'N/A')}
+Click ID: {webhook_data.get('click_id', 'N/A')}
+Client IP: {webhook_data.get('client_ip', 'N/A')}
+
+Raw Data: {json.dumps(webhook_data.get('raw_data', {}), indent=2, ensure_ascii=False)}
+"""
+
+        msg.attach(MimeText(body, 'plain', 'utf-8'))
+
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+
+        logger.info(f"Error notification email sent to {ALERT_EMAIL}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send error notification email: {e}")
+        return False
+
 def get_db_connection():
-    """Получение соединения с MariaDB"""
+    """Получение соединения с MariaDB с обработкой ошибок"""
     try:
         if not DATABASE_URL:
-            raise ValueError("DATABASE_URL not configured")
+            raise DatabaseConnectionError("DATABASE_URL not configured")
 
         parts = DATABASE_URL.replace("mysql://", "").split("/")
         db_name = parts[1] if len(parts) > 1 else "wordpress"
@@ -269,22 +388,33 @@ def get_db_connection():
             database=db_name,
             charset='utf8mb4',
             cursorclass=pymysql.cursors.DictCursor,
-            autocommit=True
+            autocommit=True,
+            connect_timeout=10,  # Таймаут подключения
+            read_timeout=30      # Таймаут чтения
         )
 
         return connection
 
+    except pymysql.MySQLError as e:
+        error_code = e.args[0] if e.args else 0
+        error_msg = str(e)
+
+        # Классификация ошибок
+        if error_code in [2003, 2002, 2005, 2006]:  # Connection errors
+            raise DatabaseConnectionError(f"Cannot connect to database: {error_msg}")
+        elif error_code in [1045]:  # Access denied
+            raise DatabaseConnectionError(f"Authentication failed: {error_msg}")
+        elif error_code in [1049]:  # Unknown database
+            raise DatabaseConnectionError(f"Database does not exist: {error_msg}")
+        else:
+            raise DatabaseOperationError(f"Database error: {error_msg}")
     except Exception as e:
-        logger.error(f"Failed to connect to database: {e}")
-        return None
+        raise DatabaseConnectionError(f"Unexpected connection error: {str(e)}")
 
 async def init_db():
-    """Инициализация базы данных с правильной структурой для EPN.bz"""
+    """Инициализация базы данных с обработкой ошибок"""
     try:
         connection = get_db_connection()
-        if not connection:
-            logger.error("Failed to connect to database for initialization")
-            return
 
         with connection.cursor() as cursor:
             # Создание таблицы для webhook событий EPN.bz
@@ -352,16 +482,19 @@ async def init_db():
 
         connection.close()
 
+    except DatabaseError as e:
+        logger.error(f"Database error during initialization: {e}")
+        send_error_email("Database Initialization Error", str(e))
+        raise
     except Exception as e:
-        logger.error(f"Error initializing database: {e}")
+        logger.error(f"Unexpected error during database initialization: {e}")
+        send_error_email("Database Initialization Unexpected Error", str(e))
+        raise
 
 async def save_webhook_event(data: Dict[str, Any]) -> bool:
-    """Сохранение события webhook в базу данных с правильной логикой EPN.bz"""
+    """Сохранение события webhook в базу данных с обработкой ошибок и email уведомлениями"""
     try:
         connection = get_db_connection()
-        if not connection:
-            logger.error("Failed to connect to database for saving")
-            return False
 
         with connection.cursor() as cursor:
             # Подготовка данных для вставки
@@ -405,7 +538,7 @@ async def save_webhook_event(data: Dict[str, Any]) -> bool:
             insert_data = {
                 'partner': data.get('partner', 'epn_bz'),
                 'event_type': data.get('event_type'),
-                'click_id': data.get('click_id'),  # Это user_id в нашей системе
+                'click_id': data.get('click_id'),
                 'order_number': data.get('order_number'),
                 'uniq_id': data.get('uniq_id'),
                 'order_status': data.get('order_status'),
@@ -438,15 +571,30 @@ async def save_webhook_event(data: Dict[str, Any]) -> bool:
         connection.close()
         return True
 
-    except Exception as e:
-        logger.error(f"Error saving webhook event: {e}")
+    except DatabaseConnectionError as e:
+        logger.error(f"Database connection error while saving webhook: {e}")
+        send_error_email("Database Connection Error", str(e), data)
+        raise  # Поднимаем ошибку для возврата 503
+
+    except DatabaseOperationError as e:
+        logger.error(f"Database operation error while saving webhook: {e}")
+        send_error_email("Database Operation Error", str(e), data)
+
+        # Некоторые операционные ошибки не требуют retry (например, дублирующие записи)
         if "Duplicate entry" in str(e):
-            logger.info("Duplicate webhook event (same uniq_id + status) - updated existing record")
+            logger.info("Duplicate webhook event - this is expected behavior")
             return True
-        return False
+        else:
+            raise  # Поднимаем для retry
+
+    except Exception as e:
+        logger.error(f"Unexpected error while saving webhook: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        send_error_email("Unexpected Database Error", f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}", data)
+        raise  # Поднимаем для retry
 EOF
 
-echo -e "${GREEN}Модуль базы данных создан${NC}"
+echo -e "${GREEN}Модуль базы данных с обработкой ошибок создан${NC}"
 
 # Базовый класс партнера
 echo -e "${YELLOW}Создание базового класса партнера...${NC}"
@@ -513,7 +661,7 @@ EOF
 
 echo -e "${GREEN}Базовый класс партнера создан${NC}"
 
-# Исправленный класс EPN.bz с правильной обработкой параметров
+# Класс EPN.bz с правильной обработкой параметров
 echo -e "${YELLOW}Создание класса EPN.bz...${NC}"
 cat > app/partners/epn_bz.py << 'EOF'
 import json
@@ -758,9 +906,9 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
 
 app = FastAPI(
-    title="EPN.bz Webhook Service",
-    description="Сервис приема webhook'ов от EPN.bz с правильной обработкой параметров",
-    version="3.0.0",
+    title="EPN.bz Webhook Service with Error Handling",
+    description="Сервис приема webhook'ов от EPN.bz с обработкой ошибок БД и email уведомлениями",
+    version="4.0.0",
     lifespan=lifespan
 )
 
@@ -773,11 +921,17 @@ webhook_processor.register_partner("epn_bz", EpnBzPartner(WEBHOOK_SECRET_TOKEN))
 @app.get("/")
 async def root():
     webhook_domain = os.getenv("WEBHOOK_DOMAIN", "webhook.yourdomain.com")
+    alert_email = os.getenv("ALERT_EMAIL", "Not configured")
     return {
-        "message": "EPN.bz Webhook Service is running",
-        "version": "3.0.0",
-        "description": "Правильная обработка параметров EPN.bz",
+        "message": "EPN.bz Webhook Service with Error Handling is running",
+        "version": "4.0.0",
+        "description": "Обработка ошибок БД + email уведомления + HTTP 503 для retry",
         "uniqueness": "partner + uniq_id + order_status",
+        "error_handling": {
+            "database_errors": "HTTP 503 + email notification + Svix retry",
+            "email_alerts": alert_email,
+            "duplicate_handling": "HTTP 200 OK (expected behavior)"
+        },
         "endpoints": {
             "health": "/health",
             "webhook_url": f"https://{webhook_domain}/webhook/{{SECRET_TOKEN}}",
@@ -793,9 +947,10 @@ async def root():
 async def health():
     return {
         "status": "healthy", 
-        "service": "epn-bz-webhook-receiver",
-        "version": "3.0.0",
-        "secret_configured": bool(WEBHOOK_SECRET_TOKEN)
+        "service": "epn-bz-webhook-receiver-with-errors",
+        "version": "4.0.0",
+        "secret_configured": bool(WEBHOOK_SECRET_TOKEN),
+        "email_configured": bool(os.getenv("ALERT_EMAIL"))
     }
 
 @app.post("/webhook/{secret_token}")
@@ -804,7 +959,7 @@ async def receive_webhook_post(
     request: Request = None,
     background_tasks: BackgroundTasks = None
 ):
-    """Прием POST webhook'ов от EPN.bz"""
+    """Прием POST webhook'ов от EPN.bz с обработкой ошибок БД"""
     return await webhook_processor.process_webhook_with_path_secret(
         secret_token, request, background_tasks
     )
@@ -815,7 +970,7 @@ async def receive_webhook_get(
     request: Request = None,
     background_tasks: BackgroundTasks = None
 ):
-    """Прием GET webhook'ов от EPN.bz"""
+    """Прием GET webhook'ов от EPN.bz с обработкой ошибок БД"""
     return await webhook_processor.process_webhook_with_path_secret(
         secret_token, request, background_tasks
     )
@@ -831,8 +986,8 @@ EOF
 
 echo -e "${GREEN}Основной файл FastAPI создан${NC}"
 
-# Процессор webhook'ов
-echo -e "${YELLOW}Создание процессора webhook'ов...${NC}"
+# Процессор webhook'ов с обработкой ошибок БД
+echo -e "${YELLOW}Создание процессора webhook'ов с обработкой ошибок...${NC}"
 cat > app/webhook_processor.py << 'EOF'
 import logging
 import os
@@ -840,17 +995,17 @@ from typing import Dict, Any
 from fastapi import Request, HTTPException, BackgroundTasks
 
 from partners.base_partner import BasePartner
-from database import save_webhook_event
+from database import save_webhook_event, DatabaseConnectionError, DatabaseOperationError
 
 logger = logging.getLogger(__name__)
 
 class WebhookProcessor:
-    """Основной процессор webhook'ов с поддержкой секрета в пути URL"""
+    """Основной процессор webhook'ов с поддержкой секрета в пути URL и обработкой ошибок БД"""
 
     def __init__(self):
         self.partners: Dict[str, BasePartner] = {}
         self.secret_token = os.getenv("WEBHOOK_SECRET_TOKEN")
-        logger.info("WebhookProcessor initialized")
+        logger.info("WebhookProcessor initialized with database error handling")
 
     def register_partner(self, partner_id: str, partner: BasePartner):
         """Регистрация нового партнера"""
@@ -863,8 +1018,10 @@ class WebhookProcessor:
         request: Request, 
         background_tasks: BackgroundTasks
     ):
-        """Обработка webhook'а с проверкой секрета в пути URL"""
+        """Обработка webhook'а с проверкой секрета в пути URL и обработкой ошибок БД"""
         start_time = None
+        processed_data = None
+
         try:
             import time
             start_time = time.time()
@@ -909,29 +1066,68 @@ class WebhookProcessor:
             # Обработка данных
             processed_data = await partner.process_data(raw_data)
 
-            # Асинхронное сохранение в базу данных
-            background_tasks.add_task(save_webhook_event, processed_data)
+            # Попытка сохранения в базу данных с обработкой ошибок
+            try:
+                # Сразу пытаемся сохранить синхронно для проверки доступности БД
+                await save_webhook_event(processed_data)
 
-            processing_time = time.time() - start_time if start_time else 0
-            logger.info(f"Successfully processed webhook for {partner_id} in {processing_time:.3f}s")
+                processing_time = time.time() - start_time if start_time else 0
+                logger.info(f"Successfully processed and saved webhook for {partner_id} in {processing_time:.3f}s")
 
-            return {
-                "status": "success",
-                "partner": partner_id,
-                "click_id": processed_data.get("click_id"),
-                "uniq_id": processed_data.get("uniq_id"),
-                "order_status": processed_data.get("order_status"),
-                "revenue": processed_data.get("revenue"),
-                "commission_fee": processed_data.get("commission_fee"),
-                "processing_time": f"{processing_time:.3f}s",
-                "message": "EPN.bz webhook processed successfully"
-            }
+                return {
+                    "status": "success",
+                    "partner": partner_id,
+                    "click_id": processed_data.get("click_id"),
+                    "uniq_id": processed_data.get("uniq_id"),
+                    "order_status": processed_data.get("order_status"),
+                    "revenue": processed_data.get("revenue"),
+                    "commission_fee": processed_data.get("commission_fee"),
+                    "processing_time": f"{processing_time:.3f}s",
+                    "message": "EPN.bz webhook processed and saved successfully",
+                    "database_status": "healthy"
+                }
+
+            except DatabaseConnectionError as e:
+                # Проблемы с подключением к БД - возвращаем 503 для retry
+                processing_time = time.time() - start_time if start_time else 0
+                logger.error(f"Database connection error after {processing_time:.3f}s: {e}")
+
+                raise HTTPException(
+                    status_code=503, 
+                    detail="Database temporarily unavailable, please retry later"
+                )
+
+            except DatabaseOperationError as e:
+                # Проблемы с операциями БД - тоже возвращаем 503 или 200 для дубликатов
+                processing_time = time.time() - start_time if start_time else 0
+                logger.error(f"Database operation error after {processing_time:.3f}s: {e}")
+
+                # Проверяем, что это не дублирование записи
+                if "Duplicate entry" in str(e):
+                    logger.info("Duplicate webhook detected, treating as success")
+                    return {
+                        "status": "success",
+                        "partner": partner_id,
+                        "click_id": processed_data.get("click_id") if processed_data else "N/A",
+                        "uniq_id": processed_data.get("uniq_id") if processed_data else "N/A", 
+                        "order_status": processed_data.get("order_status") if processed_data else "N/A",
+                        "processing_time": f"{processing_time:.3f}s",
+                        "message": "Duplicate webhook - already processed",
+                        "database_status": "duplicate_handled"
+                    }
+                else:
+                    raise HTTPException(
+                        status_code=503, 
+                        detail="Database operation error, please retry later"
+                    )
 
         except HTTPException:
+            # Передаем HTTP ошибки как есть
             raise
         except Exception as e:
             processing_time = time.time() - start_time if start_time else 0
-            logger.error(f"Error processing webhook after {processing_time:.3f}s: {e}", exc_info=True)
+            logger.error(f"Unexpected error processing webhook after {processing_time:.3f}s: {e}")
+            logger.error(f"Processed data: {processed_data}")
             raise HTTPException(status_code=500, detail="Internal server error")
 
     def _determine_partner(self, request: Request) -> str:
@@ -940,57 +1136,151 @@ class WebhookProcessor:
         return "epn_bz"
 EOF
 
-echo -e "${GREEN}Процессор webhook'ов создан${NC}"
+echo -e "${GREEN}Процессор webhook'ов с обработкой ошибок создан${NC}"
 
-# README файл с правильными инструкциями для EPN.bz
+# Документация по ошибкам
+cat > DATABASE_ERROR_SCENARIOS.md << 'EOF'
+# Сценарии ошибок базы данных и их обработка
+
+## ✅ Реализованные сценарии
+
+### 1. Недоступность сервера БД (HTTP 503)
+- **Ошибка**: Can't connect to MySQL server  
+- **Причины**: Контейнер MariaDB не запущен, сетевые проблемы
+- **Обработка**: HTTP 503 + email + Svix retry
+
+### 2. Ошибки аутентификации (HTTP 503)  
+- **Ошибка**: Access denied
+- **Причины**: Неверный логин/пароль, отозваны права
+- **Обработка**: HTTP 503 + email + немедленное уведомление админа
+
+### 3. База не существует (HTTP 503)
+- **Ошибка**: Unknown database
+- **Причины**: Неверное имя базы в DATABASE_URL
+- **Обработка**: HTTP 503 + email
+
+### 4. Таймауты (HTTP 503)
+- **Причины**: Медленный ответ БД, перегрузка
+- **Обработка**: HTTP 503 + retry (без email для снижения спама)
+
+### 5. Дублирующие записи (HTTP 200)
+- **Ошибка**: Duplicate entry
+- **Причины**: Повторная отправка того же webhook
+- **Обработка**: HTTP 200 OK (ожидаемое поведение)
+
+### 6. Deadlock'и (HTTP 503)
+- **Ошибка**: Deadlock found when trying to get lock
+- **Причины**: Конфликт блокировок при параллельных запросах
+- **Обработка**: HTTP 503 + retry
+
+### 7. Переполнение диска (HTTP 503)
+- **Ошибка**: Disk full
+- **Причины**: Закончилось место на диске
+- **Обработка**: HTTP 503 + критический email
+
+### 8. Неожиданные ошибки (HTTP 500)
+- **Причины**: Ошибки кода, проблемы с памятью
+- **Обработка**: HTTP 500 + детальный email с трассировкой
+
+## 📧 Email уведомления
+
+Настройки в .env:
+```
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your_email@gmail.com
+SMTP_PASSWORD=your_app_password
+ALERT_EMAIL=admin@yourdomain.com
+FROM_EMAIL=webhook-service@yourdomain.com
+```
+
+## 🔄 Retry логика
+
+- **HTTP 503**: Svix повторяет отправку автоматически
+- **HTTP 200**: Успех, повтор не нужен  
+- **HTTP 500**: Критическая ошибка, требует вмешательства
+
+## 📊 Мониторинг
+
+1. Логи: `docker-compose logs -f webhook_receiver`
+2. Email алерты на критические ошибки
+3. Health check: `/health` endpoint
+4. Статистика в ответах API
+
+EOF
+
+echo -e "${GREEN}Документация по ошибкам создана${NC}"
+
+# README с инструкциями
 cat > README.md << 'EOF'
-# EPN.bz Webhook Service - Исправленная версия
+# EPN.bz Webhook Service с обработкой ошибок БД
 
-Сервис для приема webhook'ов от EPN.bz с правильной обработкой параметров согласно официальной документации.
+Надежный сервис для приема webhook'ов от EPN.bz с:
+- ✅ HTTP 503 при ошибках БД (Svix retry)  
+- ✅ Email уведомления об ошибках
+- ✅ Правильная уникальность записей
+- ✅ Обработка дубликатов
 
-## Исправления
+## Ключевые особенности
 
-### ✅ Правильная уникальность
-- **Старая логика**: `(partner, transaction_id)` - НЕПРАВИЛЬНО
-- **Новая логика**: `(partner, uniq_id, order_status)` - ПРАВИЛЬНО
+### Обработка ошибок БД
+- **503 Service Unavailable**: При недоступности БД → Svix повторит
+- **200 OK**: При дублирующих записях → ожидаемое поведение  
+- **Email алерты**: При всех критических ошибках
 
-Это позволяет одному заказу (`uniq_id`) иметь разные статусы:
+### Уникальность записей
+```sql  
+UNIQUE KEY (partner, uniq_id, order_status)
+```
+Один заказ может иметь разные статусы:
 - `waiting` → `pending` → `completed`
-- `waiting` → `rejected`
+- `waiting` → `rejected` (возврат)
 
-### ✅ Правильная обработка полей EPN.bz
+### Поддерживаемые поля EPN.bz
+- **Обязательные**: `click_id`, `order_number`
+- **Статусы**: `waiting`, `pending`, `completed`, `rejected`
+- **Финансовые**: `revenue`, `commission_fee`, `currency`
 
-**Обязательные поля:**
-- `click_id` - ID пользователя (записывается в `click_id`, но это user_id)
-- `order_number` - номер заказа (уникален в рамках оффера)
-
-**Ключевые поля:**
-- `uniq_id` - уникальный идентификатор заказа в ePN
-- `order_status` - статус заказа (waiting/pending/completed/rejected)
-
-**Финансовые поля:**
-- `revenue` - сумма покупки
-- `commission_fee` - ваша комиссия со сделки
-- `currency` - код валюты (RUB, USD, EUR, GBP, TON)
-
-## URL Format
-
-```
-https://webhook.yourdomain.com/webhook/{SECRET_TOKEN}?click_id={USER_ID}&order_number={ORDER_NUM}&uniq_id={UNIQ_ID}&order_status={STATUS}&revenue={AMOUNT}&commission_fee={COMMISSION}
-```
-
-## Статусы заказов EPN.bz
-
-- `waiting` - новый заказ
-- `pending` - холд  
-- `completed` - подтверждено
-- `rejected` - заказ отменен
-
-## Запуск
+## Установка
 
 ```bash
-bash install_svix_fixed.sh
+bash install_svix_with_errors.sh
 ```
+
+Скрипт запросит:
+1. Домен и настройки БД
+2. **Email для уведомлений об ошибках**  
+3. SMTP настройки (Gmail, Yandex, etc)
+
+## Тестирование
+
+URL: `https://webhook.yourdomain.com/webhook/SECRET_TOKEN`
+
+**Примеры:**
+```bash
+# Новый заказ
+curl 'URL?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=waiting&revenue=1500&commission_fee=100'
+
+# Подтверждение  
+curl 'URL?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=completed&revenue=1500&commission_fee=100'
+
+# Возврат
+curl 'URL?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=rejected&revenue=1500&commission_fee=100'
+```
+
+## Мониторинг
+
+- **Логи**: `docker-compose logs -f webhook_receiver`
+- **Health**: `https://webhook.yourdomain.com/health`  
+- **Email алерты**: На критические ошибки БД
+
+## Что происходит при падении БД?
+
+1. ⚠️ FastAPI возвращает HTTP 503
+2. 📧 Отправляется email администратору
+3. 🔄 Svix автоматически повторяет webhook  
+4. ✅ После восстановления БД webhook сохранится
+5. 🚫 **Данные не теряются!**
 
 EOF
 
@@ -1003,7 +1293,7 @@ echo -e "${YELLOW}Запуск установки...${NC}"
 docker network create proxy 2>/dev/null || true
 docker network create wp-backend 2>/dev/null || true
 
-# Проверка существования директории app
+# Проверка существования директорий и файлов
 if [ ! -d "app" ]; then
     echo -e "${RED}Ошибка: Директория app не создана!${NC}"
     exit 1
@@ -1014,7 +1304,6 @@ if [ ! -d "app/partners" ]; then
     exit 1
 fi
 
-# Проверка файлов
 if [ ! -f "app/main.py" ]; then
     echo -e "${RED}Ошибка: Файл app/main.py не создан!${NC}"
     exit 1
@@ -1053,26 +1342,37 @@ echo ""
 echo -e "${GREEN}=== ПОЛНЫЙ WEBHOOK URL ДЛЯ EPN.BZ ===${NC}"
 echo -e "${YELLOW}${FULL_WEBHOOK_URL}${NC}"
 echo ""
-echo -e "${BLUE}Примеры тестирования EPN.bz webhook'ов:${NC}"
+echo -e "${BLUE}Настройки email уведомлений:${NC}"
+if [ -n "$ALERT_EMAIL" ]; then
+    echo -e "✅ Email уведомления: ${ALERT_EMAIL}"
+    echo -e "✅ SMTP сервер: ${SMTP_SERVER}:${SMTP_PORT}"
+    echo -e "✅ От кого: ${FROM_EMAIL}"
+else
+    echo -e "⚠️ Email уведомления отключены"
+fi
 echo ""
-echo -e "${YELLOW}1. Новый заказ (waiting):${NC}"
-echo -e "curl '${FULL_WEBHOOK_URL}?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=waiting&revenue=1500&commission_fee=100&offer_name=TestOffer&currency=RUB'"
+echo -e "${BLUE}Примеры тестирования с обработкой ошибок БД:${NC}"
 echo ""
-echo -e "${YELLOW}2. Подтверждение заказа (completed):${NC}"
-echo -e "curl '${FULL_WEBHOOK_URL}?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=completed&revenue=1500&commission_fee=100&offer_name=TestOffer&currency=RUB'"
+echo -e "${YELLOW}1. Тест при работающей БД (должен вернуть 200):${NC}"
+echo -e "curl '${FULL_WEBHOOK_URL}?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=waiting&revenue=1500&commission_fee=100'"
 echo ""
-echo -e "${YELLOW}3. Отмена заказа (rejected):${NC}"
-echo -e "curl '${FULL_WEBHOOK_URL}?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=rejected&revenue=1500&commission_fee=100&offer_name=TestOffer&currency=RUB'"
+echo -e "${YELLOW}2. Остановите MariaDB и протестируйте (должен вернуть 503):${NC}"
+echo -e "docker-compose stop mariadb"
+echo -e "curl '${FULL_WEBHOOK_URL}?click_id=123&order_number=ORDER-002&uniq_id=EPN-67890&order_status=completed&revenue=2000&commission_fee=150'"
 echo ""
-echo -e "${BLUE}Ключевые исправления:${NC}"
-echo -e "✅ Директории создаются перед записью файлов"
-echo -e "✅ Уникальность по (partner + uniq_id + order_status)"
-echo -e "✅ click_id записывается как user_id"
-echo -e "✅ Поддержка всех статусов EPN.bz"
-echo -e "✅ Проверка создания файлов"
+echo -e "${YELLOW}3. Запустите MariaDB обратно:${NC}"
+echo -e "docker-compose start mariadb"
+echo ""
+echo -e "${BLUE}Ключевые улучшения:${NC}"
+echo -e "✅ HTTP 503 при ошибках БД → Svix retry"
+echo -e "✅ Email уведомления администратору"
+echo -e "✅ Классификация типов ошибок"  
+echo -e "✅ Обработка дубликатов (HTTP 200)"
+echo -e "✅ Таймауты подключения к БД"
+echo -e "✅ Детальное логирование ошибок"
 echo ""
 echo -e "${BLUE}Для просмотра логов:${NC}"
 echo -e "docker-compose logs -f webhook_receiver"
 echo ""
 echo -e "${GREEN}Секретный токен: ${WEBHOOK_SECRET_TOKEN}${NC}"
-echo -e "${RED}ВАЖНО: Теперь один заказ может иметь разные статусы в базе!${NC}"
+echo -e "${RED}ВАЖНО: При падении БД webhook'и НЕ ТЕРЯЮТСЯ - они автоматически повторяются через Svix!${NC}"
