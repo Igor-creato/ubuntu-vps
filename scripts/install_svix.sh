@@ -97,7 +97,6 @@ echo -e "${GREEN}Файл .env создан${NC}"
 
 # Docker Compose файл
 cat > docker-compose.yml << 'EOF'
-version: '3.8'
 
 networks:
   proxy:
