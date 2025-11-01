@@ -69,6 +69,11 @@ FULL_WEBHOOK_URL="https://${WEBHOOK_DOMAIN}/webhook/${WEBHOOK_SECRET_TOKEN}"
 # Создание структуры проекта
 echo -e "${YELLOW}Создание файлов проекта...${NC}"
 
+# ИСПРАВЛЕНИЕ: Создаем все необходимые директории
+echo -e "${YELLOW}Создание структуры директорий...${NC}"
+mkdir -p app/partners
+mkdir -p scripts
+
 # .env файл
 cat > .env << EOF
 # Database Configuration
@@ -95,7 +100,135 @@ EOF
 
 echo -e "${GREEN}Файл .env создан${NC}"
 
+# Docker Compose файл
+cat > docker-compose.yml << 'EOF'
+
+networks:
+  proxy:
+    external: true
+  wp-backend:
+    external: true
+  svix-internal:
+    driver: bridge
+
+services:
+  # PostgreSQL для Svix
+  svix_postgres:
+    image: postgres:13-alpine
+    environment:
+      POSTGRES_DB: svix
+      POSTGRES_USER: svix
+      POSTGRES_PASSWORD: svix_password
+    volumes:
+      - svix_postgres_data:/var/lib/postgresql/data
+    networks:
+      - svix-internal
+    restart: unless-stopped
+
+  # Redis для Svix
+  svix_redis:
+    image: redis:7-alpine
+    networks:
+      - svix-internal
+    restart: unless-stopped
+
+  # Svix Server
+  svix_server:
+    image: svix/svix-server:latest
+    environment:
+      SVIX_DB_DSN: postgresql://svix:svix_password@svix_postgres:5432/svix
+      SVIX_REDIS_DSN: redis://svix_redis:6379
+      SVIX_JWT_SECRET: ${SVIX_JWT_SECRET}
+      SVIX_QUEUE_TYPE: redis
+    depends_on:
+      - svix_postgres
+      - svix_redis
+    networks:
+      - svix-internal
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.svix.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.svix.tls=true"
+      - "traefik.http.routers.svix.tls.certresolver=letsencrypt"
+      - "traefik.http.services.svix.loadbalancer.server.port=8071"
+      - "traefik.docker.network=proxy"
+    restart: unless-stopped
+
+  # FastAPI Webhook Receiver
+  webhook_receiver:
+    build: ./app
+    environment:
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
+      WEBHOOK_SECRET_TOKEN: ${WEBHOOK_SECRET_TOKEN}
+      TABLE_NAME: ${TABLE_NAME}
+      SVIX_API_URL: http://svix_server:8071
+    depends_on:
+      - svix_server
+    networks:
+      - svix-internal
+      - wp-backend
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.webhook.rule=Host(`${WEBHOOK_DOMAIN}`)"
+      - "traefik.http.routers.webhook.tls=true"
+      - "traefik.http.routers.webhook.tls.certresolver=letsencrypt"
+      - "traefik.http.services.webhook.loadbalancer.server.port=8000"
+      - "traefik.docker.network=proxy"
+    restart: unless-stopped
+
+volumes:
+  svix_postgres_data:
+
+EOF
+
+echo -e "${GREEN}Docker Compose файл создан${NC}"
+
+# Dockerfile
+cat > app/Dockerfile << 'EOF'
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Установка зависимостей системы
+RUN apt-get update && apt-get install -y \
+    gcc \
+    default-libmysqlclient-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копирование requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копирование кода
+COPY . .
+
+# Запуск
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+EOF
+
+echo -e "${GREEN}Dockerfile создан${NC}"
+
+# Requirements.txt
+cat > app/requirements.txt << 'EOF'
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+sqlalchemy==2.0.23
+pymysql==1.1.0
+cryptography==41.0.7
+python-multipart==0.0.6
+pydantic==2.5.0
+httpx==0.25.2
+python-dotenv==1.0.0
+alembic==1.12.1
+EOF
+
+echo -e "${GREEN}Requirements.txt создан${NC}"
+
 # Модуль для работы с базой данных (исправленный для EPN.bz)
+echo -e "${YELLOW}Создание модуля базы данных...${NC}"
 cat > app/database.py << 'EOF'
 import os
 import logging
@@ -313,9 +446,75 @@ async def save_webhook_event(data: Dict[str, Any]) -> bool:
         return False
 EOF
 
-echo -e "${GREEN}Исправленный модуль базы данных для EPN.bz создан${NC}"
+echo -e "${GREEN}Модуль базы данных создан${NC}"
+
+# Базовый класс партнера
+echo -e "${YELLOW}Создание базового класса партнера...${NC}"
+cat > app/partners/__init__.py << 'EOF'
+"""Пакет для партнеров webhook'ов"""
+EOF
+
+cat > app/partners/base_partner.py << 'EOF'
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
+from fastapi import Request
+import logging
+
+logger = logging.getLogger(__name__)
+
+class BasePartner(ABC):
+    """Базовый класс для всех партнеров"""
+
+    def __init__(self, name: str, secret_token: Optional[str] = None):
+        self.name = name
+        self.secret_token = secret_token
+        logger.info(f"Initialized partner: {name}")
+
+    @abstractmethod
+    async def verify_secret_token(self, provided_token: str) -> bool:
+        """Проверка секретного токена из пути URL"""
+        pass
+
+    @abstractmethod
+    async def parse_webhook(self, request: Request, body: bytes) -> Dict[str, Any]:
+        """Парсинг данных webhook'а"""
+        pass
+
+    @abstractmethod
+    async def process_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Обработка и нормализация данных"""
+        pass
+
+    def get_client_ip(self, request: Request) -> str:
+        """Получение IP клиента"""
+        x_forwarded_for = request.headers.get("X-Forwarded-For")
+        if x_forwarded_for:
+            return x_forwarded_for.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+
+    def verify_path_secret_token(self, provided_token: str) -> bool:
+        """Базовая проверка токена из пути URL"""
+        if not self.secret_token:
+            logger.warning(f"No secret token configured for {self.name}")
+            return True  # Пропускаем если токен не настроен
+
+        if not provided_token:
+            logger.warning(f"No token provided in URL path for {self.name}")
+            return False
+
+        is_valid = provided_token == self.secret_token
+        logger.info(f"Token validation for {self.name}: {'Valid' if is_valid else 'Invalid'}")
+        return is_valid
+
+    async def validate_request(self, request: Request) -> bool:
+        """Дополнительная валидация запроса"""
+        return True
+EOF
+
+echo -e "${GREEN}Базовый класс партнера создан${NC}"
 
 # Исправленный класс EPN.bz с правильной обработкой параметров
+echo -e "${YELLOW}Создание класса EPN.bz...${NC}"
 cat > app/partners/epn_bz.py << 'EOF'
 import json
 from typing import Dict, Any, Optional
@@ -521,141 +720,13 @@ class EpnBzPartner(BasePartner):
 
         logger.info(f"EPN.bz request validation: IP={client_ip}, UA={user_agent[:50]}...")
 
-        # Можно добавить дополнительные проверки:
-        # 1. Whitelist IP адресов EPN.bz
-        # 2. Проверка User-Agent
-        # 3. Rate limiting
-
         return True
 EOF
 
-echo -e "${GREEN}Исправленный класс EPN.bz с правильной обработкой параметров создан${NC}"
-
-# Docker Compose файл (без изменений)
-cat > docker-compose.yml << 'EOF'
-
-networks:
-  proxy:
-    external: true
-  wp-backend:
-    external: true
-  svix-internal:
-    driver: bridge
-
-services:
-  # PostgreSQL для Svix
-  svix_postgres:
-    image: postgres:13-alpine
-    environment:
-      POSTGRES_DB: svix
-      POSTGRES_USER: svix
-      POSTGRES_PASSWORD: svix_password
-    volumes:
-      - svix_postgres_data:/var/lib/postgresql/data
-    networks:
-      - svix-internal
-    restart: unless-stopped
-
-  # Redis для Svix
-  svix_redis:
-    image: redis:7-alpine
-    networks:
-      - svix-internal
-    restart: unless-stopped
-
-  # Svix Server
-  svix_server:
-    image: svix/svix-server:latest
-    environment:
-      SVIX_DB_DSN: postgresql://svix:svix_password@svix_postgres:5432/svix
-      SVIX_REDIS_DSN: redis://svix_redis:6379
-      SVIX_JWT_SECRET: ${SVIX_JWT_SECRET}
-      SVIX_QUEUE_TYPE: redis
-    depends_on:
-      - svix_postgres
-      - svix_redis
-    networks:
-      - svix-internal
-      - proxy
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.svix.rule=Host(`${DOMAIN}`)"
-      - "traefik.http.routers.svix.tls=true"
-      - "traefik.http.routers.svix.tls.certresolver=letsencrypt"
-      - "traefik.http.services.svix.loadbalancer.server.port=8071"
-      - "traefik.docker.network=proxy"
-    restart: unless-stopped
-
-  # FastAPI Webhook Receiver
-  webhook_receiver:
-    build: ./app
-    environment:
-      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
-      WEBHOOK_SECRET_TOKEN: ${WEBHOOK_SECRET_TOKEN}
-      TABLE_NAME: ${TABLE_NAME}
-      SVIX_API_URL: http://svix_server:8071
-    depends_on:
-      - svix_server
-    networks:
-      - svix-internal
-      - wp-backend
-      - proxy
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.webhook.rule=Host(`${WEBHOOK_DOMAIN}`)"
-      - "traefik.http.routers.webhook.tls=true"
-      - "traefik.http.routers.webhook.tls.certresolver=letsencrypt"
-      - "traefik.http.services.webhook.loadbalancer.server.port=8000"
-      - "traefik.docker.network=proxy"
-    restart: unless-stopped
-
-volumes:
-  svix_postgres_data:
-
-EOF
-
-# Создание структуры FastAPI приложения
-mkdir -p app/partners
-
-# Dockerfile
-cat > app/Dockerfile << 'EOF'
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Установка зависимостей системы
-RUN apt-get update && apt-get install -y \
-    gcc \
-    default-libmysqlclient-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
-# Копирование requirements
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Копирование кода
-COPY . .
-
-# Запуск
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-EOF
-
-# Requirements.txt
-cat > app/requirements.txt << 'EOF'
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-sqlalchemy==2.0.23
-pymysql==1.1.0
-cryptography==41.0.7
-python-multipart==0.0.6
-pydantic==2.5.0
-httpx==0.25.2
-python-dotenv==1.0.0
-alembic==1.12.1
-EOF
+echo -e "${GREEN}Класс EPN.bz создан${NC}"
 
 # Основной файл FastAPI
+echo -e "${YELLOW}Создание основного файла FastAPI...${NC}"
 cat > app/main.py << 'EOF'
 import os
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Path
@@ -758,69 +829,10 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 EOF
 
-# Базовый класс партнера
-cat > app/partners/__init__.py << 'EOF'
-"""Пакет для партнеров webhook'ов"""
-EOF
+echo -e "${GREEN}Основной файл FastAPI создан${NC}"
 
-cat > app/partners/base_partner.py << 'EOF'
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
-from fastapi import Request
-import logging
-
-logger = logging.getLogger(__name__)
-
-class BasePartner(ABC):
-    """Базовый класс для всех партнеров"""
-
-    def __init__(self, name: str, secret_token: Optional[str] = None):
-        self.name = name
-        self.secret_token = secret_token
-        logger.info(f"Initialized partner: {name}")
-
-    @abstractmethod
-    async def verify_secret_token(self, provided_token: str) -> bool:
-        """Проверка секретного токена из пути URL"""
-        pass
-
-    @abstractmethod
-    async def parse_webhook(self, request: Request, body: bytes) -> Dict[str, Any]:
-        """Парсинг данных webhook'а"""
-        pass
-
-    @abstractmethod
-    async def process_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Обработка и нормализация данных"""
-        pass
-
-    def get_client_ip(self, request: Request) -> str:
-        """Получение IP клиента"""
-        x_forwarded_for = request.headers.get("X-Forwarded-For")
-        if x_forwarded_for:
-            return x_forwarded_for.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
-
-    def verify_path_secret_token(self, provided_token: str) -> bool:
-        """Базовая проверка токена из пути URL"""
-        if not self.secret_token:
-            logger.warning(f"No secret token configured for {self.name}")
-            return True  # Пропускаем если токен не настроен
-
-        if not provided_token:
-            logger.warning(f"No token provided in URL path for {self.name}")
-            return False
-
-        is_valid = provided_token == self.secret_token
-        logger.info(f"Token validation for {self.name}: {'Valid' if is_valid else 'Invalid'}")
-        return is_valid
-
-    async def validate_request(self, request: Request) -> bool:
-        """Дополнительная валидация запроса"""
-        return True
-EOF
-
-# Процессор webhook'ов (без изменений)
+# Процессор webhook'ов
+echo -e "${YELLOW}Создание процессора webhook'ов...${NC}"
 cat > app/webhook_processor.py << 'EOF'
 import logging
 import os
@@ -928,4 +940,139 @@ class WebhookProcessor:
         return "epn_bz"
 EOF
 
-echo -e "${GREEN}Основные файлы приложения созданы${NC}"
+echo -e "${GREEN}Процессор webhook'ов создан${NC}"
+
+# README файл с правильными инструкциями для EPN.bz
+cat > README.md << 'EOF'
+# EPN.bz Webhook Service - Исправленная версия
+
+Сервис для приема webhook'ов от EPN.bz с правильной обработкой параметров согласно официальной документации.
+
+## Исправления
+
+### ✅ Правильная уникальность
+- **Старая логика**: `(partner, transaction_id)` - НЕПРАВИЛЬНО
+- **Новая логика**: `(partner, uniq_id, order_status)` - ПРАВИЛЬНО
+
+Это позволяет одному заказу (`uniq_id`) иметь разные статусы:
+- `waiting` → `pending` → `completed`
+- `waiting` → `rejected`
+
+### ✅ Правильная обработка полей EPN.bz
+
+**Обязательные поля:**
+- `click_id` - ID пользователя (записывается в `click_id`, но это user_id)
+- `order_number` - номер заказа (уникален в рамках оффера)
+
+**Ключевые поля:**
+- `uniq_id` - уникальный идентификатор заказа в ePN
+- `order_status` - статус заказа (waiting/pending/completed/rejected)
+
+**Финансовые поля:**
+- `revenue` - сумма покупки
+- `commission_fee` - ваша комиссия со сделки
+- `currency` - код валюты (RUB, USD, EUR, GBP, TON)
+
+## URL Format
+
+```
+https://webhook.yourdomain.com/webhook/{SECRET_TOKEN}?click_id={USER_ID}&order_number={ORDER_NUM}&uniq_id={UNIQ_ID}&order_status={STATUS}&revenue={AMOUNT}&commission_fee={COMMISSION}
+```
+
+## Статусы заказов EPN.bz
+
+- `waiting` - новый заказ
+- `pending` - холд  
+- `completed` - подтверждено
+- `rejected` - заказ отменен
+
+## Запуск
+
+```bash
+bash install_svix_fixed.sh
+```
+
+EOF
+
+echo -e "${GREEN}README создан${NC}"
+
+# Завершающая часть установки
+echo -e "${YELLOW}Запуск установки...${NC}"
+
+# Создание сетей если не существуют
+docker network create proxy 2>/dev/null || true
+docker network create wp-backend 2>/dev/null || true
+
+# Проверка существования директории app
+if [ ! -d "app" ]; then
+    echo -e "${RED}Ошибка: Директория app не создана!${NC}"
+    exit 1
+fi
+
+if [ ! -d "app/partners" ]; then
+    echo -e "${RED}Ошибка: Директория app/partners не создана!${NC}"
+    exit 1
+fi
+
+# Проверка файлов
+if [ ! -f "app/main.py" ]; then
+    echo -e "${RED}Ошибка: Файл app/main.py не создан!${NC}"
+    exit 1
+fi
+
+if [ ! -f "app/database.py" ]; then
+    echo -e "${RED}Ошибка: Файл app/database.py не создан!${NC}"
+    exit 1
+fi
+
+if [ ! -f "app/partners/epn_bz.py" ]; then
+    echo -e "${RED}Ошибка: Файл app/partners/epn_bz.py не создан!${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Все файлы успешно созданы${NC}"
+
+# Сборка и запуск
+echo -e "${YELLOW}Сборка и запуск контейнеров...${NC}"
+docker-compose up -d --build
+
+# Ожидание запуска сервисов
+echo -e "${YELLOW}Ожидание запуска сервисов (30 секунд)...${NC}"
+sleep 30
+
+# Проверка статуса
+echo -e "${BLUE}Проверка статуса сервисов:${NC}"
+docker-compose ps
+
+echo -e "${GREEN}=== УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО! ===${NC}"
+echo -e "${BLUE}Сервисы доступны по адресам:${NC}"
+echo -e "Svix Dashboard: https://${DOMAIN}"
+echo -e "Webhook Receiver: https://${WEBHOOK_DOMAIN}"
+echo -e "Health Check: https://${WEBHOOK_DOMAIN}/health"
+echo ""
+echo -e "${GREEN}=== ПОЛНЫЙ WEBHOOK URL ДЛЯ EPN.BZ ===${NC}"
+echo -e "${YELLOW}${FULL_WEBHOOK_URL}${NC}"
+echo ""
+echo -e "${BLUE}Примеры тестирования EPN.bz webhook'ов:${NC}"
+echo ""
+echo -e "${YELLOW}1. Новый заказ (waiting):${NC}"
+echo -e "curl '${FULL_WEBHOOK_URL}?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=waiting&revenue=1500&commission_fee=100&offer_name=TestOffer&currency=RUB'"
+echo ""
+echo -e "${YELLOW}2. Подтверждение заказа (completed):${NC}"
+echo -e "curl '${FULL_WEBHOOK_URL}?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=completed&revenue=1500&commission_fee=100&offer_name=TestOffer&currency=RUB'"
+echo ""
+echo -e "${YELLOW}3. Отмена заказа (rejected):${NC}"
+echo -e "curl '${FULL_WEBHOOK_URL}?click_id=123&order_number=ORDER-001&uniq_id=EPN-12345&order_status=rejected&revenue=1500&commission_fee=100&offer_name=TestOffer&currency=RUB'"
+echo ""
+echo -e "${BLUE}Ключевые исправления:${NC}"
+echo -e "✅ Директории создаются перед записью файлов"
+echo -e "✅ Уникальность по (partner + uniq_id + order_status)"
+echo -e "✅ click_id записывается как user_id"
+echo -e "✅ Поддержка всех статусов EPN.bz"
+echo -e "✅ Проверка создания файлов"
+echo ""
+echo -e "${BLUE}Для просмотра логов:${NC}"
+echo -e "docker-compose logs -f webhook_receiver"
+echo ""
+echo -e "${GREEN}Секретный токен: ${WEBHOOK_SECRET_TOKEN}${NC}"
+echo -e "${RED}ВАЖНО: Теперь один заказ может иметь разные статусы в базе!${NC}"
