@@ -7,7 +7,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Установка Svix Webhook Service (Path-based Secret) ===${NC}"
+echo -e "${BLUE}=== Установка Svix Webhook Service (EPN.bz Corrected) ===${NC}"
 
 # Проверка что мы не root
 if [ "$EUID" -eq 0 ]; then
@@ -72,7 +72,7 @@ echo -e "${YELLOW}Создание файлов проекта...${NC}"
 # .env файл
 cat > .env << EOF
 # Database Configuration
-DATABASE_URL=mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
+DATABASE_URL=mysql://${DB_USER}:${DB_PASSWORD}@mariadb:3306/${DB_NAME}
 DB_USER=${DB_USER}
 DB_PASSWORD=${DB_PASSWORD}
 DB_NAME=${DB_NAME}
@@ -95,8 +95,445 @@ EOF
 
 echo -e "${GREEN}Файл .env создан${NC}"
 
-# Docker Compose файл
+# Модуль для работы с базой данных (исправленный для EPN.bz)
+cat > app/database.py << 'EOF'
+import os
+import logging
+from typing import Dict, Any, Optional
+import pymysql
+from datetime import datetime
+import json
+
+logger = logging.getLogger(__name__)
+
+# Настройки подключения к базе данных
+DATABASE_URL = os.getenv("DATABASE_URL")
+TABLE_NAME = os.getenv("TABLE_NAME", "webhook_events")
+
+def get_db_connection():
+    """Получение соединения с MariaDB"""
+    try:
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL not configured")
+
+        parts = DATABASE_URL.replace("mysql://", "").split("/")
+        db_name = parts[1] if len(parts) > 1 else "wordpress"
+
+        auth_host = parts[0].split("@")
+        host_port = auth_host[1].split(":")
+        host = host_port[0]
+        port = int(host_port[1]) if len(host_port) > 1 else 3306
+
+        user_pass = auth_host[0].split(":")
+        user = user_pass[0]
+        password = user_pass[1]
+
+        connection = pymysql.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=db_name,
+            charset='utf8mb4',
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=True
+        )
+
+        return connection
+
+    except Exception as e:
+        logger.error(f"Failed to connect to database: {e}")
+        return None
+
+async def init_db():
+    """Инициализация базы данных с правильной структурой для EPN.bz"""
+    try:
+        connection = get_db_connection()
+        if not connection:
+            logger.error("Failed to connect to database for initialization")
+            return
+
+        with connection.cursor() as cursor:
+            # Создание таблицы для webhook событий EPN.bz
+            create_table_sql = f"""
+            CREATE TABLE IF NOT EXISTS `{TABLE_NAME}` (
+                `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+                `partner` varchar(50) NOT NULL DEFAULT 'epn_bz' COMMENT 'Партнер (epn_bz, admitad, etc)',
+                `event_type` varchar(100) NOT NULL COMMENT 'Тип события',
+
+                -- EPN.bz обязательные поля
+                `click_id` varchar(255) NOT NULL COMMENT 'ID пользователя из click_id',
+                `order_number` varchar(255) NOT NULL COMMENT 'Номер заказа (уникален в рамках оффера)',
+                `uniq_id` varchar(255) NOT NULL COMMENT 'Уникальный идентификатор заказа в ePN',
+                `order_status` varchar(50) NOT NULL COMMENT 'Статус заказа (waiting/pending/completed/rejected)',
+
+                -- EPN.bz необязательные поля
+                `offer_name` varchar(500) DEFAULT NULL COMMENT 'Название оффера в ePN',
+                `offer_type` varchar(100) DEFAULT NULL COMMENT 'Тег оффера в ePN',
+                `offer_id` varchar(255) DEFAULT NULL COMMENT 'ID оффера в системе ePN',
+                `type_id` int(11) DEFAULT NULL COMMENT 'Тип оффера (1-стандартные, 2-реферальные, 3-оффлайн)',
+                `sub` varchar(255) DEFAULT NULL COMMENT 'Sub1 переданный при переходе',
+                `sub2` varchar(255) DEFAULT NULL COMMENT 'Sub2 переданный при переходе',
+                `sub3` varchar(255) DEFAULT NULL COMMENT 'Sub3 переданный при переходе',
+                `sub4` varchar(255) DEFAULT NULL COMMENT 'Sub4 переданный при переходе',
+                `sub5` varchar(255) DEFAULT NULL COMMENT 'Sub5 переданный при переходе',
+                `revenue` decimal(15,2) DEFAULT 0.00 COMMENT 'Сумма покупки',
+                `commission_fee` decimal(15,2) DEFAULT 0.00 COMMENT 'Комиссия со сделки',
+                `currency` varchar(3) DEFAULT 'RUB' COMMENT 'Код валюты (RUB, USD, EUR, GBP, TON)',
+                `ip` varchar(45) DEFAULT NULL COMMENT 'IPv4 адрес перехода на оффер',
+                `ipv6` varchar(45) DEFAULT NULL COMMENT 'IPv6 адрес перехода на оффер',
+                `user_agent_epn` text COMMENT 'UserAgent зафиксированный при переходе в ePN',
+                `click_time` varchar(50) DEFAULT NULL COMMENT 'Время совершения клика (yyyy-mm-dd h:i:s)',
+                `time_of_order` varchar(50) DEFAULT NULL COMMENT 'Время появления заказа в системе ePN',
+
+                -- Дополнительные технические поля
+                `client_ip` varchar(45) DEFAULT NULL COMMENT 'IP адрес webhook запроса',
+                `user_agent` text COMMENT 'User Agent webhook запроса',
+                `raw_data` json DEFAULT NULL COMMENT 'Исходные данные webhook',
+                `processed_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Время обработки',
+                `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Время создания',
+                `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Время обновления',
+
+                PRIMARY KEY (`id`),
+
+                -- ИСПРАВЛЕННАЯ УНИКАЛЬНОСТЬ: partner + uniq_id + order_status
+                -- Это позволяет одному заказу иметь разные статусы (waiting -> completed -> rejected)
+                UNIQUE KEY `unique_partner_uniq_status` (`partner`, `uniq_id`, `order_status`),
+
+                -- Индексы для оптимизации
+                KEY `idx_partner_status` (`partner`, `order_status`),
+                KEY `idx_created_at` (`created_at`),
+                KEY `idx_uniq_id` (`uniq_id`),
+                KEY `idx_click_id` (`click_id`),
+                KEY `idx_order_number` (`order_number`),
+                KEY `idx_partner_created` (`partner`, `created_at`),
+                KEY `idx_revenue_commission` (`revenue`, `commission_fee`),
+                KEY `idx_event_type` (`event_type`),
+                KEY `idx_offer_id` (`offer_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci 
+              COMMENT='Таблица для хранения событий от EPN.bz с правильной уникальностью'
+            """
+
+            cursor.execute(create_table_sql)
+            logger.info(f"Table {TABLE_NAME} created or already exists with correct EPN.bz structure")
+
+        connection.close()
+
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+
+async def save_webhook_event(data: Dict[str, Any]) -> bool:
+    """Сохранение события webhook в базу данных с правильной логикой EPN.bz"""
+    try:
+        connection = get_db_connection()
+        if not connection:
+            logger.error("Failed to connect to database for saving")
+            return False
+
+        with connection.cursor() as cursor:
+            # Подготовка данных для вставки
+            insert_sql = f"""
+            INSERT INTO `{TABLE_NAME}` 
+            (partner, event_type, click_id, order_number, uniq_id, order_status,
+             offer_name, offer_type, offer_id, type_id, sub, sub2, sub3, sub4, sub5,
+             revenue, commission_fee, currency, ip, ipv6, user_agent_epn, 
+             click_time, time_of_order, client_ip, user_agent, raw_data)
+            VALUES 
+            (%(partner)s, %(event_type)s, %(click_id)s, %(order_number)s, %(uniq_id)s, %(order_status)s,
+             %(offer_name)s, %(offer_type)s, %(offer_id)s, %(type_id)s, %(sub)s, %(sub2)s, %(sub3)s, %(sub4)s, %(sub5)s,
+             %(revenue)s, %(commission_fee)s, %(currency)s, %(ip)s, %(ipv6)s, %(user_agent_epn)s,
+             %(click_time)s, %(time_of_order)s, %(client_ip)s, %(user_agent)s, %(raw_data)s)
+            ON DUPLICATE KEY UPDATE
+            event_type = VALUES(event_type),
+            offer_name = VALUES(offer_name),
+            offer_type = VALUES(offer_type),
+            offer_id = VALUES(offer_id),
+            type_id = VALUES(type_id),
+            sub = VALUES(sub),
+            sub2 = VALUES(sub2),
+            sub3 = VALUES(sub3),
+            sub4 = VALUES(sub4),
+            sub5 = VALUES(sub5),
+            revenue = VALUES(revenue),
+            commission_fee = VALUES(commission_fee),
+            currency = VALUES(currency),
+            ip = VALUES(ip),
+            ipv6 = VALUES(ipv6),
+            user_agent_epn = VALUES(user_agent_epn),
+            click_time = VALUES(click_time),
+            time_of_order = VALUES(time_of_order),
+            client_ip = VALUES(client_ip),
+            user_agent = VALUES(user_agent),
+            raw_data = VALUES(raw_data),
+            updated_at = CURRENT_TIMESTAMP
+            """
+
+            # Подготовка данных
+            insert_data = {
+                'partner': data.get('partner', 'epn_bz'),
+                'event_type': data.get('event_type'),
+                'click_id': data.get('click_id'),  # Это user_id в нашей системе
+                'order_number': data.get('order_number'),
+                'uniq_id': data.get('uniq_id'),
+                'order_status': data.get('order_status'),
+                'offer_name': data.get('offer_name'),
+                'offer_type': data.get('offer_type'),
+                'offer_id': data.get('offer_id'),
+                'type_id': data.get('type_id'),
+                'sub': data.get('sub'),
+                'sub2': data.get('sub2'),
+                'sub3': data.get('sub3'),
+                'sub4': data.get('sub4'),
+                'sub5': data.get('sub5'),
+                'revenue': data.get('revenue', 0),
+                'commission_fee': data.get('commission_fee', 0),
+                'currency': data.get('currency', 'RUB'),
+                'ip': data.get('ip'),
+                'ipv6': data.get('ipv6'),
+                'user_agent_epn': data.get('user_agent_epn'),
+                'click_time': data.get('click_time'),
+                'time_of_order': data.get('time_of_order'),
+                'client_ip': data.get('client_ip'),
+                'user_agent': data.get('user_agent'),
+                'raw_data': json.dumps(data.get('raw_data', {}), ensure_ascii=False)
+            }
+
+            cursor.execute(insert_sql, insert_data)
+
+            logger.info(f"Saved EPN.bz webhook: partner={insert_data['partner']}, uniq_id={insert_data['uniq_id']}, status={insert_data['order_status']}, revenue={insert_data['revenue']} {insert_data['currency']}")
+
+        connection.close()
+        return True
+
+    except Exception as e:
+        logger.error(f"Error saving webhook event: {e}")
+        if "Duplicate entry" in str(e):
+            logger.info("Duplicate webhook event (same uniq_id + status) - updated existing record")
+            return True
+        return False
+EOF
+
+echo -e "${GREEN}Исправленный модуль базы данных для EPN.bz создан${NC}"
+
+# Исправленный класс EPN.bz с правильной обработкой параметров
+cat > app/partners/epn_bz.py << 'EOF'
+import json
+from typing import Dict, Any, Optional
+from fastapi import Request, HTTPException
+from urllib.parse import parse_qs
+import logging
+
+from .base_partner import BasePartner
+
+logger = logging.getLogger(__name__)
+
+class EpnBzPartner(BasePartner):
+    """Класс для работы с webhook'ами EPN.bz согласно официальной документации"""
+
+    def __init__(self, secret_token: Optional[str] = None):
+        super().__init__("EPN.bz", secret_token)
+        logger.info(f"EPN.bz partner initialized with token: {'Yes' if secret_token else 'No'}")
+
+    async def verify_secret_token(self, provided_token: str) -> bool:
+        """Проверка секретного токена из пути URL для EPN.bz"""
+        try:
+            is_valid = self.verify_path_secret_token(provided_token)
+
+            if is_valid:
+                logger.info(f"EPN.bz token verification successful")
+            else:
+                logger.warning(f"EPN.bz token verification failed")
+
+            return is_valid
+
+        except Exception as e:
+            logger.error(f"Error verifying EPN.bz token: {e}")
+            return False
+
+    async def parse_webhook(self, request: Request, body: bytes) -> Dict[str, Any]:
+        """Парсинг webhook'а от EPN.bz согласно документации"""
+        try:
+            client_ip = self.get_client_ip(request)
+            user_agent = request.headers.get("user-agent", "")
+            content_type = request.headers.get("content-type", "")
+
+            if request.method == "POST":
+                if "application/json" in content_type:
+                    # JSON payload
+                    data = json.loads(body.decode('utf-8'))
+                    logger.info("Parsed EPN.bz JSON data")
+                elif "application/x-www-form-urlencoded" in content_type:
+                    # Form data
+                    form_data = parse_qs(body.decode('utf-8'))
+                    data = {k: v[0] if len(v) == 1 else v for k, v in form_data.items()}
+                    logger.info("Parsed EPN.bz form data")
+                else:
+                    try:
+                        data = json.loads(body.decode('utf-8'))
+                        logger.info("Parsed EPN.bz data as JSON fallback")
+                    except:
+                        raw_string = body.decode('utf-8')
+                        data = {"raw_content": raw_string}
+                        logger.info("Parsed EPN.bz data as raw string")
+            else:
+                # GET request - параметры в URL
+                data = dict(request.query_params)
+                logger.info("Parsed EPN.bz GET data")
+
+            # Добавляем метаданные
+            data["_client_ip"] = client_ip
+            data["_user_agent"] = user_agent
+            data["_method"] = request.method
+            data["_content_type"] = content_type
+
+            logger.info(f"Parsed EPN.bz data keys: {list(data.keys())}")
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from EPN.bz: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON format")
+        except Exception as e:
+            logger.error(f"Error parsing EPN.bz webhook: {e}")
+            raise HTTPException(status_code=400, detail="Failed to parse webhook data")
+
+    async def process_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Обработка и нормализация данных EPN.bz согласно документации"""
+        try:
+            # Обязательные поля согласно документации EPN.bz
+            click_id = data.get("click_id")  # ID пользователя в нашей БД
+            order_number = data.get("order_number")
+
+            # Проверяем обязательные поля
+            if not click_id:
+                raise HTTPException(status_code=400, detail="Missing required field: click_id")
+            if not order_number:
+                raise HTTPException(status_code=400, detail="Missing required field: order_number")
+
+            # Определяем тип события на основе order_status
+            order_status = self._normalize_order_status(data.get("order_status"))
+            event_type = self._determine_event_type(order_status)
+
+            # Нормализация данных согласно документации EPN.bz
+            processed_data = {
+                "partner": "epn_bz",
+                "event_type": event_type,
+
+                # Обязательные поля EPN.bz
+                "click_id": click_id,  # ID пользователя
+                "order_number": order_number,
+                "uniq_id": data.get("uniq_id", f"gen_{order_number}_{click_id}"),  # Генерируем если нет
+                "order_status": order_status,
+
+                # Необязательные поля EPN.bz
+                "offer_name": data.get("offer_name"),
+                "offer_type": data.get("offer_type"),
+                "offer_id": data.get("offer_id"),
+                "type_id": self._extract_int(data, "type_id"),
+                "sub": data.get("sub"),
+                "sub2": data.get("sub2"),
+                "sub3": data.get("sub3"),
+                "sub4": data.get("sub4"),
+                "sub5": data.get("sub5"),
+                "revenue": self._extract_amount(data, "revenue"),
+                "commission_fee": self._extract_amount(data, "commission_fee"),
+                "currency": data.get("currency", "RUB"),
+                "ip": data.get("ip"),
+                "ipv6": data.get("ipv6"),
+                "user_agent_epn": data.get("user_agent"),  # UserAgent от EPN
+                "click_time": data.get("click_time"),
+                "time_of_order": data.get("time_of_order"),
+
+                # Технические поля
+                "client_ip": data.get("_client_ip"),
+                "user_agent": data.get("_user_agent"),  # UserAgent webhook запроса
+                "raw_data": data
+            }
+
+            logger.info(f"Processed EPN.bz data: uniq_id={processed_data['uniq_id']}, status={processed_data['order_status']}, revenue={processed_data['revenue']}, commission={processed_data['commission_fee']}")
+            return processed_data
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error processing EPN.bz data: {e}")
+            raise HTTPException(status_code=400, detail="Failed to process webhook data")
+
+    def _normalize_order_status(self, status: Optional[str]) -> str:
+        """Нормализация статуса заказа согласно документации EPN.bz"""
+        if not status:
+            return "unknown"
+
+        status_lower = status.lower()
+
+        # Возможные значения согласно документации EPN.bz:
+        # waiting (новый заказ), pending (холд), completed (подтверждено), rejected (заказ отменен)
+        if status_lower in ["waiting"]:
+            return "waiting"
+        elif status_lower in ["pending"]:
+            return "pending"
+        elif status_lower in ["completed", "confirmed", "approved"]:
+            return "completed"
+        elif status_lower in ["rejected", "cancelled", "canceled", "declined"]:
+            return "rejected"
+        else:
+            logger.warning(f"Unknown EPN.bz order status: {status}")
+            return status_lower
+
+    def _determine_event_type(self, order_status: str) -> str:
+        """Определение типа события на основе статуса"""
+        if order_status == "waiting":
+            return "order.created"
+        elif order_status == "pending":
+            return "order.pending"
+        elif order_status == "completed":
+            return "order.completed"
+        elif order_status == "rejected":
+            return "order.rejected"
+        else:
+            return "order.unknown"
+
+    def _extract_amount(self, data: Dict[str, Any], field: str) -> float:
+        """Безопасное извлечение суммы"""
+        try:
+            value = data.get(field, 0)
+            if value is None or value == '':
+                return 0.0
+            return float(value)
+        except (ValueError, TypeError):
+            logger.warning(f"Failed to convert {field}={data.get(field)} to float")
+            return 0.0
+
+    def _extract_int(self, data: Dict[str, Any], field: str) -> Optional[int]:
+        """Безопасное извлечение целого числа"""
+        try:
+            value = data.get(field)
+            if value is None or value == '':
+                return None
+            return int(value)
+        except (ValueError, TypeError):
+            logger.warning(f"Failed to convert {field}={data.get(field)} to int")
+            return None
+
+    async def validate_request(self, request: Request) -> bool:
+        """Дополнительная валидация для EPN.bz"""
+        client_ip = self.get_client_ip(request)
+        user_agent = request.headers.get("user-agent", "")
+
+        logger.info(f"EPN.bz request validation: IP={client_ip}, UA={user_agent[:50]}...")
+
+        # Можно добавить дополнительные проверки:
+        # 1. Whitelist IP адресов EPN.bz
+        # 2. Проверка User-Agent
+        # 3. Rate limiting
+
+        return True
+EOF
+
+echo -e "${GREEN}Исправленный класс EPN.bz с правильной обработкой параметров создан${NC}"
+
+# Docker Compose файл (без изменений)
 cat > docker-compose.yml << 'EOF'
+version: '3.8'
 
 networks:
   proxy:
@@ -154,7 +591,7 @@ services:
   webhook_receiver:
     build: ./app
     environment:
-      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@mariadb:3306/${DB_NAME}
       WEBHOOK_SECRET_TOKEN: ${WEBHOOK_SECRET_TOKEN}
       TABLE_NAME: ${TABLE_NAME}
       SVIX_API_URL: http://svix_server:8071
@@ -177,8 +614,6 @@ volumes:
   svix_postgres_data:
 
 EOF
-
-echo -e "${GREEN}Docker Compose файл создан${NC}"
 
 # Создание структуры FastAPI приложения
 mkdir -p app/partners
@@ -221,9 +656,7 @@ python-dotenv==1.0.0
 alembic==1.12.1
 EOF
 
-echo -e "${GREEN}Dockerfile и requirements.txt созданы${NC}"
-
-# Основной файл FastAPI с поддержкой секрета в пути URL
+# Основной файл FastAPI
 cat > app/main.py << 'EOF'
 import os
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Path
@@ -255,9 +688,9 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
 
 app = FastAPI(
-    title="Universal Webhook Service",
-    description="Универсальный сервис приема webhook'ов с секретом в пути URL",
-    version="2.0.0",
+    title="EPN.bz Webhook Service",
+    description="Сервис приема webhook'ов от EPN.bz с правильной обработкой параметров",
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -271,13 +704,18 @@ webhook_processor.register_partner("epn_bz", EpnBzPartner(WEBHOOK_SECRET_TOKEN))
 async def root():
     webhook_domain = os.getenv("WEBHOOK_DOMAIN", "webhook.yourdomain.com")
     return {
-        "message": "Universal Webhook Service is running",
-        "version": "2.0.0",
-        "description": "Секрет передается в пути URL",
+        "message": "EPN.bz Webhook Service is running",
+        "version": "3.0.0",
+        "description": "Правильная обработка параметров EPN.bz",
+        "uniqueness": "partner + uniq_id + order_status",
         "endpoints": {
             "health": "/health",
             "webhook_url": f"https://{webhook_domain}/webhook/{{SECRET_TOKEN}}",
             "example": f"https://{webhook_domain}/webhook/{WEBHOOK_SECRET_TOKEN[:16]}..." if WEBHOOK_SECRET_TOKEN else "Not configured"
+        },
+        "epn_bz_fields": {
+            "required": ["click_id", "order_number"],
+            "optional": ["uniq_id", "order_status", "offer_name", "revenue", "commission_fee", "etc"]
         }
     }
 
@@ -285,8 +723,8 @@ async def root():
 async def health():
     return {
         "status": "healthy", 
-        "service": "webhook-receiver",
-        "version": "2.0.0",
+        "service": "epn-bz-webhook-receiver",
+        "version": "3.0.0",
         "secret_configured": bool(WEBHOOK_SECRET_TOKEN)
     }
 
@@ -296,7 +734,7 @@ async def receive_webhook_post(
     request: Request = None,
     background_tasks: BackgroundTasks = None
 ):
-    """Прием POST webhook'ов с проверкой секрета в пути URL"""
+    """Прием POST webhook'ов от EPN.bz"""
     return await webhook_processor.process_webhook_with_path_secret(
         secret_token, request, background_tasks
     )
@@ -307,7 +745,7 @@ async def receive_webhook_get(
     request: Request = None,
     background_tasks: BackgroundTasks = None
 ):
-    """Прием GET webhook'ов с проверкой секрета в пути URL"""
+    """Прием GET webhook'ов от EPN.bz"""
     return await webhook_processor.process_webhook_with_path_secret(
         secret_token, request, background_tasks
     )
@@ -320,8 +758,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"error": "Internal server error"}
     )
 EOF
-
-echo -e "${GREEN}Основной файл FastAPI с секретом в пути URL создан${NC}"
 
 # Базовый класс партнера
 cat > app/partners/__init__.py << 'EOF'
@@ -385,218 +821,7 @@ class BasePartner(ABC):
         return True
 EOF
 
-echo -e "${GREEN}Базовый класс партнера с поддержкой секрета в пути URL создан${NC}"
-
-# Обновленный класс EPN.bz с проверкой секрета в пути URL
-cat > app/partners/epn_bz.py << 'EOF'
-import json
-from typing import Dict, Any, Optional
-from fastapi import Request, HTTPException
-from urllib.parse import parse_qs
-import logging
-
-from .base_partner import BasePartner
-
-logger = logging.getLogger(__name__)
-
-class EpnBzPartner(BasePartner):
-    """Класс для работы с webhook'ами EPN.bz с проверкой секрета в пути URL"""
-
-    def __init__(self, secret_token: Optional[str] = None):
-        super().__init__("EPN.bz", secret_token)
-        logger.info(f"EPN.bz partner initialized with token: {'Yes' if secret_token else 'No'}")
-
-    async def verify_secret_token(self, provided_token: str) -> bool:
-        """
-        EPN.bz проверка секретного токена из пути URL
-        """
-        try:
-            # Проверяем токен из пути URL
-            is_valid = self.verify_path_secret_token(provided_token)
-
-            if is_valid:
-                logger.info(f"EPN.bz token verification successful")
-            else:
-                logger.warning(f"EPN.bz token verification failed")
-
-            return is_valid
-
-        except Exception as e:
-            logger.error(f"Error verifying EPN.bz token: {e}")
-            return False
-
-    async def parse_webhook(self, request: Request, body: bytes) -> Dict[str, Any]:
-        """Парсинг webhook'а от EPN.bz"""
-        try:
-            client_ip = self.get_client_ip(request)
-            user_agent = request.headers.get("user-agent", "")
-            content_type = request.headers.get("content-type", "")
-
-            if request.method == "POST":
-                if "application/json" in content_type:
-                    # JSON payload
-                    data = json.loads(body.decode('utf-8'))
-                    logger.info("Parsed EPN.bz JSON data")
-                elif "application/x-www-form-urlencoded" in content_type:
-                    # Form data
-                    form_data = parse_qs(body.decode('utf-8'))
-                    data = {k: v[0] if len(v) == 1 else v for k, v in form_data.items()}
-                    logger.info("Parsed EPN.bz form data")
-                else:
-                    # Попытка парсинга как JSON
-                    try:
-                        data = json.loads(body.decode('utf-8'))
-                        logger.info("Parsed EPN.bz data as JSON fallback")
-                    except:
-                        # Если не JSON, то как строка
-                        raw_string = body.decode('utf-8')
-                        data = {"raw_content": raw_string}
-                        logger.info("Parsed EPN.bz data as raw string")
-            else:
-                # GET request - параметры в URL
-                data = dict(request.query_params)
-                logger.info("Parsed EPN.bz GET data")
-
-            # Добавляем метаданные
-            data["_client_ip"] = client_ip
-            data["_user_agent"] = user_agent
-            data["_method"] = request.method
-            data["_content_type"] = content_type
-
-            logger.info(f"Parsed EPN.bz data keys: {list(data.keys())}")
-            return data
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from EPN.bz: {e}")
-            raise HTTPException(status_code=400, detail="Invalid JSON format")
-        except Exception as e:
-            logger.error(f"Error parsing EPN.bz webhook: {e}")
-            raise HTTPException(status_code=400, detail="Failed to parse webhook data")
-
-    async def process_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Обработка и нормализация данных EPN.bz"""
-        try:
-            # Определяем тип события на основе данных
-            event_type = self._determine_event_type(data)
-
-            # Нормализация данных к единому формату
-            processed_data = {
-                "partner": "epn_bz",
-                "event_type": event_type,
-                "transaction_id": self._extract_transaction_id(data),
-                "order_id": data.get("order_id") or data.get("order_number") or data.get("offer_id"),
-                "amount": self._extract_amount(data, "revenue") or self._extract_amount(data, "amount"),
-                "commission": self._extract_amount(data, "commission") or self._extract_amount(data, "commission_fee"),
-                "status": self._normalize_status(data.get("status") or data.get("order_status")),
-                "currency": data.get("currency", "RUB"),
-                "user_id": data.get("user_id") or data.get("sub") or data.get("subid"),
-                "offer_id": data.get("offer_id"),
-                "offer_name": data.get("offer_name"),
-                "click_id": data.get("click_id"),
-                "uniq_id": data.get("uniq_id"),
-                "click_time": data.get("click_time"),
-                "time_of_order": data.get("time_of_order"),
-                "client_ip": data.get("_client_ip"),
-                "user_agent": data.get("_user_agent"),
-                "raw_data": data,
-                "processed_at": None  # Будет установлено в базе данных
-            }
-
-            # Валидация и генерация transaction_id если отсутствует
-            if not processed_data["transaction_id"]:
-                processed_data["transaction_id"] = self._generate_transaction_id(data)
-                logger.warning(f"Generated transaction_id: {processed_data['transaction_id']}")
-
-            logger.info(f"Processed EPN.bz data: transaction_id={processed_data['transaction_id']}, amount={processed_data['amount']}, commission={processed_data['commission']}")
-            return processed_data
-
-        except Exception as e:
-            logger.error(f"Error processing EPN.bz data: {e}")
-            raise HTTPException(status_code=400, detail="Failed to process webhook data")
-
-    def _determine_event_type(self, data: Dict[str, Any]) -> str:
-        """Определение типа события"""
-        status = (data.get("status") or data.get("order_status", "")).lower()
-
-        if status in ["confirmed", "approved", "paid"]:
-            return "order.confirmed"
-        elif status in ["pending", "hold", "waiting"]:
-            return "order.pending"
-        elif status in ["cancelled", "rejected", "declined", "canceled"]:
-            return "order.cancelled"
-        elif data.get("click_id"):
-            return "click.tracked"
-        else:
-            return "event.unknown"
-
-    def _extract_transaction_id(self, data: Dict[str, Any]) -> Optional[str]:
-        """Извлечение transaction_id из различных полей"""
-        return (data.get("click_id") or 
-                data.get("transaction_id") or 
-                data.get("uniq_id") or
-                data.get("order_id") or 
-                data.get("order_number"))
-
-    def _extract_amount(self, data: Dict[str, Any], field: str) -> float:
-        """Безопасное извлечение суммы"""
-        try:
-            value = data.get(field, 0)
-            return float(value) if value else 0.0
-        except (ValueError, TypeError):
-            return 0.0
-
-    def _normalize_status(self, status: Optional[str]) -> str:
-        """Нормализация статуса"""
-        if not status:
-            return "unknown"
-
-        status_lower = status.lower()
-        if status_lower in ["confirmed", "approved", "paid"]:
-            return "confirmed"
-        elif status_lower in ["pending", "hold", "waiting"]:
-            return "pending"
-        elif status_lower in ["cancelled", "rejected", "declined", "canceled"]:
-            return "cancelled"
-        else:
-            return status_lower
-
-    def _generate_transaction_id(self, data: Dict[str, Any]) -> str:
-        """Генерация transaction_id из доступных данных"""
-        parts = []
-        if data.get('order_number'):
-            parts.append(f"order_{data['order_number']}")
-        if data.get('user_id'):
-            parts.append(f"user_{data['user_id']}")
-        if data.get('offer_id'):
-            parts.append(f"offer_{data['offer_id']}")
-
-        if parts:
-            return "_".join(parts)
-        else:
-            # Генерируем на основе хеша данных
-            import hashlib
-            data_str = json.dumps(data, sort_keys=True)
-            hash_part = hashlib.md5(data_str.encode()).hexdigest()[:8]
-            return f"epn_generated_{hash_part}"
-
-    async def validate_request(self, request: Request) -> bool:
-        """Дополнительная валидация для EPN.bz"""
-        client_ip = self.get_client_ip(request)
-        user_agent = request.headers.get("user-agent", "")
-
-        logger.info(f"EPN.bz request validation: IP={client_ip}, UA={user_agent[:50]}...")
-
-        # Можно добавить дополнительные проверки:
-        # 1. Whitelist IP адресов EPN.bz
-        # 2. Проверка User-Agent
-        # 3. Rate limiting
-
-        return True
-EOF
-
-echo -e "${GREEN}Обновленный класс партнера EPN.bz с секретом в пути URL создан${NC}"
-
-# Процессор webhook'ов с поддержкой секрета в пути URL
+# Процессор webhook'ов (без изменений)
 cat > app/webhook_processor.py << 'EOF'
 import logging
 import os
@@ -645,7 +870,6 @@ class WebhookProcessor:
             logger.info(f"Valid secret token provided, processing webhook ({request.method})")
 
             # Определяем партнера (пока используем epn_bz по умолчанию)
-            # В будущем можно расширить логику определения партнера
             partner_id = self._determine_partner(request)
 
             if partner_id not in self.partners:
@@ -677,21 +901,19 @@ class WebhookProcessor:
             # Асинхронное сохранение в базу данных
             background_tasks.add_task(save_webhook_event, processed_data)
 
-            # Отправка в Svix (можно добавить позже)
-            # background_tasks.add_task(send_to_svix, processed_data)
-
             processing_time = time.time() - start_time if start_time else 0
             logger.info(f"Successfully processed webhook for {partner_id} in {processing_time:.3f}s")
 
             return {
                 "status": "success",
                 "partner": partner_id,
-                "transaction_id": processed_data.get("transaction_id"),
-                "event_type": processed_data.get("event_type"),
-                "amount": processed_data.get("amount"),
-                "commission": processed_data.get("commission"),
+                "click_id": processed_data.get("click_id"),
+                "uniq_id": processed_data.get("uniq_id"),
+                "order_status": processed_data.get("order_status"),
+                "revenue": processed_data.get("revenue"),
+                "commission_fee": processed_data.get("commission_fee"),
                 "processing_time": f"{processing_time:.3f}s",
-                "message": "Webhook processed successfully"
+                "message": "EPN.bz webhook processed successfully"
             }
 
         except HTTPException:
@@ -704,325 +926,7 @@ class WebhookProcessor:
     def _determine_partner(self, request: Request) -> str:
         """Определение партнера на основе запроса"""
         # Пока возвращаем epn_bz по умолчанию
-        # В будущем можно добавить логику определения по:
-        # - User-Agent
-        # - Заголовкам
-        # - Структуре данных
-        # - Дополнительным параметрам в URL
-
-        user_agent = request.headers.get("user-agent", "").lower()
-
-        # Примеры определения партнера:
-        if "epn" in user_agent:
-            return "epn_bz"
-        elif "admitad" in user_agent:
-            return "admitad"  # Когда добавим
-        elif "cityads" in user_agent:
-            return "cityads"  # Когда добавим
-
-        # По умолчанию - EPN.bz
         return "epn_bz"
 EOF
 
-echo -e "${GREEN}Процессор webhook'ов с поддержкой секрета в пути URL создан${NC}"
-
-# Используем тот же модуль базы данных (без изменений)
-cat > app/database.py << 'EOF'
-import os
-import logging
-from typing import Dict, Any, Optional
-import pymysql
-from datetime import datetime
-import json
-
-logger = logging.getLogger(__name__)
-
-# Настройки подключения к базе данных
-DATABASE_URL = os.getenv("DATABASE_URL")
-TABLE_NAME = os.getenv("TABLE_NAME", "webhook_events")
-
-def get_db_connection():
-    """Получение соединения с MariaDB"""
-    try:
-        # Парсинг DATABASE_URL
-        # mysql://user:password@host:port/database
-        if not DATABASE_URL:
-            raise ValueError("DATABASE_URL not configured")
-
-        parts = DATABASE_URL.replace("mysql://", "").split("/")
-        db_name = parts[1] if len(parts) > 1 else "wordpress"
-
-        auth_host = parts[0].split("@")
-        host_port = auth_host[1].split(":")
-        host = host_port[0]
-        port = int(host_port[1]) if len(host_port) > 1 else 3306
-
-        user_pass = auth_host[0].split(":")
-        user = user_pass[0]
-        password = user_pass[1]
-
-        connection = pymysql.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            database=db_name,
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor,
-            autocommit=True
-        )
-
-        return connection
-
-    except Exception as e:
-        logger.error(f"Failed to connect to database: {e}")
-        return None
-
-async def init_db():
-    """Инициализация базы данных"""
-    try:
-        connection = get_db_connection()
-        if not connection:
-            logger.error("Failed to connect to database for initialization")
-            return
-
-        with connection.cursor() as cursor:
-            # Создание таблицы для webhook событий
-            create_table_sql = f"""
-            CREATE TABLE IF NOT EXISTS `{TABLE_NAME}` (
-                `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-                `partner` varchar(50) NOT NULL COMMENT 'Партнер (epn_bz, admitad, etc)',
-                `event_type` varchar(100) NOT NULL COMMENT 'Тип события',
-                `transaction_id` varchar(255) DEFAULT NULL COMMENT 'Уникальный ID транзакции',
-                `order_id` varchar(255) DEFAULT NULL COMMENT 'ID заказа',
-                `amount` decimal(15,2) DEFAULT 0.00 COMMENT 'Сумма заказа',
-                `commission` decimal(15,2) DEFAULT 0.00 COMMENT 'Размер комиссии/кешбэка',
-                `status` varchar(50) NOT NULL COMMENT 'Статус события',
-                `currency` varchar(3) DEFAULT 'RUB' COMMENT 'Валюта',
-                `user_id` varchar(255) DEFAULT NULL COMMENT 'ID пользователя',
-                `offer_id` varchar(255) DEFAULT NULL COMMENT 'ID оффера/товара',
-                `offer_name` varchar(500) DEFAULT NULL COMMENT 'Название оффера/товара',
-                `click_id` varchar(255) DEFAULT NULL COMMENT 'ID клика',
-                `uniq_id` varchar(255) DEFAULT NULL COMMENT 'Уникальный ID',
-                `shop_id` varchar(255) DEFAULT NULL COMMENT 'ID магазина',
-                `click_time` varchar(50) DEFAULT NULL COMMENT 'Время клика',
-                `time_of_order` varchar(50) DEFAULT NULL COMMENT 'Время заказа',
-                `client_ip` varchar(45) DEFAULT NULL COMMENT 'IP адрес клиента',
-                `user_agent` text COMMENT 'User Agent браузера',
-                `raw_data` json DEFAULT NULL COMMENT 'Исходные данные webhook',
-                `processed_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Время обработки',
-                `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Время создания',
-                `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Время обновления',
-                PRIMARY KEY (`id`),
-                UNIQUE KEY `unique_partner_transaction` (`partner`, `transaction_id`),
-                KEY `idx_partner_status` (`partner`, `status`),
-                KEY `idx_created_at` (`created_at`),
-                KEY `idx_transaction_id` (`transaction_id`),
-                KEY `idx_partner_created` (`partner`, `created_at`),
-                KEY `idx_status_amount` (`status`, `amount`),
-                KEY `idx_event_type` (`event_type`),
-                KEY `idx_user_id` (`user_id`),
-                KEY `idx_click_id` (`click_id`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci 
-              COMMENT='Таблица для хранения событий от webhook партнеров'
-            """
-
-            cursor.execute(create_table_sql)
-            logger.info(f"Table {TABLE_NAME} created or already exists")
-
-        connection.close()
-
-    except Exception as e:
-        logger.error(f"Error initializing database: {e}")
-
-async def save_webhook_event(data: Dict[str, Any]) -> bool:
-    """Сохранение события webhook в базу данных"""
-    try:
-        connection = get_db_connection()
-        if not connection:
-            logger.error("Failed to connect to database for saving")
-            return False
-
-        with connection.cursor() as cursor:
-            # Подготовка данных для вставки
-            insert_sql = f"""
-            INSERT INTO `{TABLE_NAME}` 
-            (partner, event_type, transaction_id, order_id, amount, commission, 
-             status, currency, user_id, offer_id, offer_name, click_id, uniq_id,
-             shop_id, click_time, time_of_order, client_ip, user_agent, raw_data)
-            VALUES 
-            (%(partner)s, %(event_type)s, %(transaction_id)s, %(order_id)s, 
-             %(amount)s, %(commission)s, %(status)s, %(currency)s, 
-             %(user_id)s, %(offer_id)s, %(offer_name)s, %(click_id)s, %(uniq_id)s,
-             %(shop_id)s, %(click_time)s, %(time_of_order)s, %(client_ip)s, 
-             %(user_agent)s, %(raw_data)s)
-            ON DUPLICATE KEY UPDATE
-            event_type = VALUES(event_type),
-            order_id = VALUES(order_id),
-            amount = VALUES(amount),
-            commission = VALUES(commission),
-            status = VALUES(status),
-            currency = VALUES(currency),
-            user_id = VALUES(user_id),
-            offer_id = VALUES(offer_id),
-            offer_name = VALUES(offer_name),
-            click_id = VALUES(click_id),
-            uniq_id = VALUES(uniq_id),
-            shop_id = VALUES(shop_id),
-            click_time = VALUES(click_time),
-            time_of_order = VALUES(time_of_order),
-            client_ip = VALUES(client_ip),
-            user_agent = VALUES(user_agent),
-            raw_data = VALUES(raw_data),
-            updated_at = CURRENT_TIMESTAMP
-            """
-
-            # Подготовка данных
-            insert_data = {
-                'partner': data.get('partner'),
-                'event_type': data.get('event_type'),
-                'transaction_id': data.get('transaction_id'),
-                'order_id': data.get('order_id'),
-                'amount': data.get('amount', 0),
-                'commission': data.get('commission', 0),
-                'status': data.get('status'),
-                'currency': data.get('currency', 'RUB'),
-                'user_id': data.get('user_id'),
-                'offer_id': data.get('offer_id'),
-                'offer_name': data.get('offer_name'),
-                'click_id': data.get('click_id'),
-                'uniq_id': data.get('uniq_id'),
-                'shop_id': data.get('shop_id'),
-                'click_time': data.get('click_time'),
-                'time_of_order': data.get('time_of_order'),
-                'client_ip': data.get('client_ip'),
-                'user_agent': data.get('user_agent'),
-                'raw_data': json.dumps(data.get('raw_data', {}), ensure_ascii=False)
-            }
-
-            cursor.execute(insert_sql, insert_data)
-
-            logger.info(f"Saved webhook event: {data.get('partner')} - {data.get('transaction_id')} - {data.get('amount')} {data.get('currency', 'RUB')}")
-
-        connection.close()
-        return True
-
-    except Exception as e:
-        logger.error(f"Error saving webhook event: {e}")
-        if "Duplicate entry" in str(e):
-            logger.info("Duplicate webhook event - updated existing record")
-            return True
-        return False
-EOF
-
-echo -e "${GREEN}Модуль базы данных создан${NC}"
-
-# README файл с инструкциями
-cat > README.md << EOF
-# Universal Webhook Service - Секрет в пути URL
-
-Универсальный сервис для приема webhook'ов с секретом в пути URL.
-
-## Архитектура
-
-\`\`\`
-Партнеры → FastAPI (секрет в URL path) → Svix → MariaDB
-\`\`\`
-
-## URL Format
-
-**Формат URL:**
-\`\`\`
-https://webhook.yourdomain.com/webhook/{SECRET_TOKEN}
-\`\`\`
-
-**Пример:**
-\`\`\`
-https://webhook.comfyui.autmatization-bot.ru/webhook/71df03c1eb976689e60c9136c7c72ffdcdca2d216b6858f678b75306391b6893
-\`\`\`
-
-## Использование
-
-### Настройка у партнеров:
-- URL: \`https://webhook.yourdomain.com/webhook/YOUR_SECRET_TOKEN\`
-- Поддерживает POST и GET запросы
-- Параметры передаются обычным способом: \`?param1=value1&param2=value2\`
-
-### Пример полного URL с параметрами:
-\`\`\`
-https://webhook.comfyui.autmatization-bot.ru/webhook/71df03c1eb976689e60c9136c7c72ffdcdca2d216b6858f678b75306391b6893?click_id=test123&order_number=50&offer_name=TestOffer&order_status=confirmed&user_id=6&revenue=1500&commission=100
-\`\`\`
-
-## Безопасность
-
-- ✅ 64-символьный hex токен в пути URL
-- ✅ Проверка токена перед обработкой
-- ✅ Логирование всех попыток доступа
-- ✅ HTTP 401 при неверном токене
-
-## Поддерживаемые поля EPN.bz
-
-- click_id, order_number, order_id
-- offer_name, offer_id
-- order_status, status
-- user_id, sub, subid
-- revenue, amount
-- commission, commission_fee
-- uniq_id
-- click_time, time_of_order
-
-## Запуск
-
-\`\`\`bash
-bash install_svix_path_secret.sh
-\`\`\`
-
-EOF
-
-# Завершающая часть установки
-echo -e "${YELLOW}Запуск установки...${NC}"
-
-# Создание сетей если не существуют
-docker network create proxy 2>/dev/null || true
-docker network create wp-backend 2>/dev/null || true
-
-# Сборка и запуск
-echo -e "${YELLOW}Сборка и запуск контейнеров...${NC}"
-docker-compose up -d --build
-
-# Ожидание запуска сервисов
-echo -e "${YELLOW}Ожидание запуска сервисов (30 секунд)...${NC}"
-sleep 30
-
-# Проверка статуса
-echo -e "${BLUE}Проверка статуса сервисов:${NC}"
-docker-compose ps
-
-echo -e "${GREEN}=== УСТАНОВКА ЗАВЕРШЕНА! ===${NC}"
-echo -e "${BLUE}Сервисы доступны по адресам:${NC}"
-echo -e "Svix Dashboard: https://${DOMAIN}"
-echo -e "Webhook Receiver: https://${WEBHOOK_DOMAIN}"
-echo -e "Health Check: https://${WEBHOOK_DOMAIN}/health"
-echo ""
-echo -e "${GREEN}=== ПОЛНЫЙ WEBHOOK URL ===${NC}"
-echo -e "${YELLOW}${FULL_WEBHOOK_URL}${NC}"
-echo ""
-echo -e "${BLUE}Примеры использования:${NC}"
-echo ""
-echo -e "${YELLOW}POST запрос с JSON:${NC}"
-echo -e "curl -X POST '${FULL_WEBHOOK_URL}' \\"
-echo -e "  -H 'Content-Type: application/json' \\"
-echo -e "  -d '{"click_id":"test123","order_number":"50","offer_name":"TestOffer","order_status":"confirmed","user_id":"6","revenue":"1500","commission":"100"}'"
-echo ""
-echo -e "${YELLOW}GET запрос с параметрами:${NC}"
-echo -e "curl '${FULL_WEBHOOK_URL}?click_id=test456&order_number=75&offer_name=TestOffer2&order_status=pending&user_id=7&revenue=2000&commission=150'"
-echo ""
-echo -e "${YELLOW}Полный пример URL с параметрами:${NC}"
-echo -e "${FULL_WEBHOOK_URL}?click_id=test123&order_number=50&offer_name=TestOffer&order_status=confirmed&user_id=6&revenue=1500&commission=100&uniq_id=uniq3w3w&click_time=2025-10-22%2020:00:00&time_of_order=2025-10-22%2020:01:00"
-echo ""
-echo -e "${BLUE}Для просмотра логов:${NC}"
-echo -e "docker-compose logs -f webhook_receiver"
-echo -e "docker-compose logs -f svix_server"
-echo ""
-echo -e "${GREEN}Секретный токен: ${WEBHOOK_SECRET_TOKEN}${NC}"
-echo -e "${GREEN}Сохраните этот URL - используйте его для настройки у партнеров!${NC}"
+echo -e "${GREEN}Основные файлы приложения созданы${NC}"
