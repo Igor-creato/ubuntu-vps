@@ -7,7 +7,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Установка Svix Webhook Service (Updated) ===${NC}"
+echo -e "${BLUE}=== Установка Svix Webhook Service (Path-based Secret) ===${NC}"
 
 # Проверка что мы не root
 if [ "$EUID" -eq 0 ]; then
@@ -58,12 +58,13 @@ fi
 read -p "Введите название базы данных [wordpress]: " DB_NAME
 DB_NAME=${DB_NAME:-wordpress}
 
-read -p "Введите URL для приема хуков [/webhook]: " WEBHOOK_URL
-WEBHOOK_URL=${WEBHOOK_URL:-/webhook}
+# Генерация секретного токена для пути URL (64 символа hex)
+WEBHOOK_SECRET_TOKEN=$(openssl rand -hex 32)
+echo -e "${GREEN}Сгенерирован секретный токен: $WEBHOOK_SECRET_TOKEN${NC}"
 
-# Генерация секрета
-WEBHOOK_SECRET=$(openssl rand -hex 32)
-echo -e "${GREEN}Сгенерирован секрет: $WEBHOOK_SECRET${NC}"
+# Формирование полного webhook URL
+WEBHOOK_DOMAIN="webhook.${DOMAIN}"
+FULL_WEBHOOK_URL="https://${WEBHOOK_DOMAIN}/webhook/${WEBHOOK_SECRET_TOKEN}"
 
 # Создание структуры проекта
 echo -e "${YELLOW}Создание файлов проекта...${NC}"
@@ -78,8 +79,8 @@ DB_NAME=${DB_NAME}
 TABLE_NAME=${TABLE_NAME}
 
 # Webhook Configuration
-WEBHOOK_SECRET=${WEBHOOK_SECRET}
-WEBHOOK_URL=${WEBHOOK_URL}
+WEBHOOK_SECRET_TOKEN=${WEBHOOK_SECRET_TOKEN}
+WEBHOOK_DOMAIN=${WEBHOOK_DOMAIN}
 DOMAIN=${DOMAIN}
 
 # Svix Configuration
@@ -96,6 +97,7 @@ echo -e "${GREEN}Файл .env создан${NC}"
 
 # Docker Compose файл
 cat > docker-compose.yml << 'EOF'
+version: '3.8'
 
 networks:
   proxy:
@@ -154,7 +156,7 @@ services:
     build: ./app
     environment:
       DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@mariadb:3306/${DB_NAME}
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      WEBHOOK_SECRET_TOKEN: ${WEBHOOK_SECRET_TOKEN}
       TABLE_NAME: ${TABLE_NAME}
       SVIX_API_URL: http://svix_server:8071
     depends_on:
@@ -165,7 +167,7 @@ services:
       - proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.webhook.rule=Host(`webhook.${DOMAIN}`)"
+      - "traefik.http.routers.webhook.rule=Host(`${WEBHOOK_DOMAIN}`)"
       - "traefik.http.routers.webhook.tls=true"
       - "traefik.http.routers.webhook.tls.certresolver=letsencrypt"
       - "traefik.http.services.webhook.loadbalancer.server.port=8000"
@@ -222,10 +224,10 @@ EOF
 
 echo -e "${GREEN}Dockerfile и requirements.txt созданы${NC}"
 
-# Основной файл FastAPI с поддержкой секрета в URL
+# Основной файл FastAPI с поддержкой секрета в пути URL
 cat > app/main.py << 'EOF'
 import os
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Path
 from fastapi.responses import JSONResponse
 import logging
 from contextlib import asynccontextmanager
@@ -238,8 +240,8 @@ from partners.epn_bz import EpnBzPartner
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Получение секрета из переменной окружения
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+# Получение секретного токена из переменной окружения
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")
 
 # Инициализация базы данных при старте
 @asynccontextmanager
@@ -248,33 +250,35 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized")
-    logger.info(f"Webhook secret configured: {'Yes' if WEBHOOK_SECRET else 'No'}")
+    logger.info(f"Webhook secret token configured: {'Yes' if WEBHOOK_SECRET_TOKEN else 'No'}")
     yield
     # Shutdown
     logger.info("Shutting down...")
 
 app = FastAPI(
     title="Universal Webhook Service",
-    description="Универсальный сервис приема webhook'ов с поддержкой секрета в URL",
-    version="1.0.0",
+    description="Универсальный сервис приема webhook'ов с секретом в пути URL",
+    version="2.0.0",
     lifespan=lifespan
 )
 
 # Инициализация процессора webhook'ов
 webhook_processor = WebhookProcessor()
 
-# Регистрация партнеров
-webhook_processor.register_partner("epn_bz", EpnBzPartner(WEBHOOK_SECRET))
+# Регистрация партнеров с токеном
+webhook_processor.register_partner("epn_bz", EpnBzPartner(WEBHOOK_SECRET_TOKEN))
 
 @app.get("/")
 async def root():
+    webhook_domain = os.getenv("WEBHOOK_DOMAIN", "webhook.yourdomain.com")
     return {
         "message": "Universal Webhook Service is running",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "description": "Секрет передается в пути URL",
         "endpoints": {
             "health": "/health",
-            "webhook_epn_bz": f"/webhook/epn_bz?secret=YOUR_SECRET",
-            "webhook_generic": "/webhook/{{partner_id}}?secret=YOUR_SECRET"
+            "webhook_url": f"https://{webhook_domain}/webhook/{{SECRET_TOKEN}}",
+            "example": f"https://{webhook_domain}/webhook/{WEBHOOK_SECRET_TOKEN[:16]}..." if WEBHOOK_SECRET_TOKEN else "Not configured"
         }
     }
 
@@ -283,29 +287,30 @@ async def health():
     return {
         "status": "healthy", 
         "service": "webhook-receiver",
-        "secret_configured": bool(WEBHOOK_SECRET)
+        "version": "2.0.0",
+        "secret_configured": bool(WEBHOOK_SECRET_TOKEN)
     }
 
-@app.post("/webhook/{partner_id}")
+@app.post("/webhook/{secret_token}")
 async def receive_webhook_post(
-    partner_id: str, 
-    request: Request, 
-    background_tasks: BackgroundTasks
+    secret_token: str = Path(..., description="Секретный токен для аутентификации"),
+    request: Request = None,
+    background_tasks: BackgroundTasks = None
 ):
-    """Прием POST webhook'ов с проверкой секрета в URL"""
-    return await webhook_processor.process_webhook(
-        partner_id, request, background_tasks
+    """Прием POST webhook'ов с проверкой секрета в пути URL"""
+    return await webhook_processor.process_webhook_with_path_secret(
+        secret_token, request, background_tasks
     )
 
-@app.get("/webhook/{partner_id}")
+@app.get("/webhook/{secret_token}")
 async def receive_webhook_get(
-    partner_id: str, 
-    request: Request, 
-    background_tasks: BackgroundTasks
+    secret_token: str = Path(..., description="Секретный токен для аутентификации"),
+    request: Request = None,
+    background_tasks: BackgroundTasks = None
 ):
-    """Прием GET webhook'ов с проверкой секрета в URL"""
-    return await webhook_processor.process_webhook(
-        partner_id, request, background_tasks
+    """Прием GET webhook'ов с проверкой секрета в пути URL"""
+    return await webhook_processor.process_webhook_with_path_secret(
+        secret_token, request, background_tasks
     )
 
 @app.exception_handler(Exception)
@@ -317,7 +322,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 EOF
 
-echo -e "${GREEN}Основной файл FastAPI с поддержкой секрета в URL создан${NC}"
+echo -e "${GREEN}Основной файл FastAPI с секретом в пути URL создан${NC}"
 
 # Базовый класс партнера
 cat > app/partners/__init__.py << 'EOF'
@@ -335,14 +340,14 @@ logger = logging.getLogger(__name__)
 class BasePartner(ABC):
     """Базовый класс для всех партнеров"""
 
-    def __init__(self, name: str, secret_key: Optional[str] = None):
+    def __init__(self, name: str, secret_token: Optional[str] = None):
         self.name = name
-        self.secret_key = secret_key
+        self.secret_token = secret_token
         logger.info(f"Initialized partner: {name}")
 
     @abstractmethod
-    async def verify_signature(self, request: Request, body: bytes) -> bool:
-        """Проверка подписи или секрета webhook'а"""
+    async def verify_secret_token(self, provided_token: str) -> bool:
+        """Проверка секретного токена из пути URL"""
         pass
 
     @abstractmethod
@@ -360,21 +365,20 @@ class BasePartner(ABC):
         x_forwarded_for = request.headers.get("X-Forwarded-For")
         if x_forwarded_for:
             return x_forwarded_for.split(",")[0].strip()
-        return request.client.host
+        return request.client.host if request.client else "unknown"
 
-    def verify_secret_in_url(self, request: Request) -> bool:
-        """Проверка секрета в параметрах URL"""
-        if not self.secret_key:
-            logger.warning(f"No secret key configured for {self.name}")
-            return True  # Пропускаем если секрет не настроен
+    def verify_path_secret_token(self, provided_token: str) -> bool:
+        """Базовая проверка токена из пути URL"""
+        if not self.secret_token:
+            logger.warning(f"No secret token configured for {self.name}")
+            return True  # Пропускаем если токен не настроен
 
-        secret_in_url = request.query_params.get("secret", "")
-        if not secret_in_url:
-            logger.warning(f"No secret parameter in URL for {self.name}")
+        if not provided_token:
+            logger.warning(f"No token provided in URL path for {self.name}")
             return False
 
-        is_valid = secret_in_url == self.secret_key
-        logger.info(f"Secret validation for {self.name}: {'Valid' if is_valid else 'Invalid'}")
+        is_valid = provided_token == self.secret_token
+        logger.info(f"Token validation for {self.name}: {'Valid' if is_valid else 'Invalid'}")
         return is_valid
 
     async def validate_request(self, request: Request) -> bool:
@@ -382,9 +386,9 @@ class BasePartner(ABC):
         return True
 EOF
 
-echo -e "${GREEN}Базовый класс партнера с поддержкой секрета в URL создан${NC}"
+echo -e "${GREEN}Базовый класс партнера с поддержкой секрета в пути URL создан${NC}"
 
-# Обновленный класс EPN.bz с проверкой секрета в URL
+# Обновленный класс EPN.bz с проверкой секрета в пути URL
 cat > app/partners/epn_bz.py << 'EOF'
 import json
 from typing import Dict, Any, Optional
@@ -397,33 +401,29 @@ from .base_partner import BasePartner
 logger = logging.getLogger(__name__)
 
 class EpnBzPartner(BasePartner):
-    """Класс для работы с webhook'ами EPN.bz с проверкой секрета в URL"""
+    """Класс для работы с webhook'ами EPN.bz с проверкой секрета в пути URL"""
 
-    def __init__(self, secret_key: Optional[str] = None):
-        super().__init__("EPN.bz", secret_key)
-        logger.info(f"EPN.bz partner initialized with secret: {'Yes' if secret_key else 'No'}")
+    def __init__(self, secret_token: Optional[str] = None):
+        super().__init__("EPN.bz", secret_token)
+        logger.info(f"EPN.bz partner initialized with token: {'Yes' if secret_token else 'No'}")
 
-    async def verify_signature(self, request: Request, body: bytes) -> bool:
+    async def verify_secret_token(self, provided_token: str) -> bool:
         """
-        EPN.bz не отправляет HMAC подписи, поэтому проверяем секрет в URL параметрах
+        EPN.bz проверка секретного токена из пути URL
         """
         try:
-            # Проверяем секрет в URL
-            if not self.verify_secret_in_url(request):
-                return False
+            # Проверяем токен из пути URL
+            is_valid = self.verify_path_secret_token(provided_token)
 
-            # Дополнительно можно проверить IP адрес (если известны IP EPN.bz)
-            client_ip = self.get_client_ip(request)
-            logger.info(f"EPN.bz webhook from IP: {client_ip}")
+            if is_valid:
+                logger.info(f"EPN.bz token verification successful")
+            else:
+                logger.warning(f"EPN.bz token verification failed")
 
-            # Список разрешенных IP EPN.bz (можно дополнить)
-            # allowed_ips = ["185.71.76.0/24", "185.71.77.0/24"]  # Пример
-            # В реальности нужно получить актуальные IP из документации EPN.bz
-
-            return True
+            return is_valid
 
         except Exception as e:
-            logger.error(f"Error verifying EPN.bz request: {e}")
+            logger.error(f"Error verifying EPN.bz token: {e}")
             return False
 
     async def parse_webhook(self, request: Request, body: bytes) -> Dict[str, Any]:
@@ -431,10 +431,9 @@ class EpnBzPartner(BasePartner):
         try:
             client_ip = self.get_client_ip(request)
             user_agent = request.headers.get("user-agent", "")
+            content_type = request.headers.get("content-type", "")
 
             if request.method == "POST":
-                content_type = request.headers.get("content-type", "")
-
                 if "application/json" in content_type:
                     # JSON payload
                     data = json.loads(body.decode('utf-8'))
@@ -457,86 +456,136 @@ class EpnBzPartner(BasePartner):
             else:
                 # GET request - параметры в URL
                 data = dict(request.query_params)
-                # Удаляем секрет из данных для сохранения в БД
-                data.pop("secret", None)
                 logger.info("Parsed EPN.bz GET data")
 
             # Добавляем метаданные
             data["_client_ip"] = client_ip
             data["_user_agent"] = user_agent
             data["_method"] = request.method
+            data["_content_type"] = content_type
 
-            logger.info(f"Parsed EPN.bz data: {data}")
+            logger.info(f"Parsed EPN.bz data keys: {list(data.keys())}")
             return data
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON from EPN.bz: {e}")
-            raise HTTPException(status_code=400, detail="Invalid JSON")
+            raise HTTPException(status_code=400, detail="Invalid JSON format")
         except Exception as e:
             logger.error(f"Error parsing EPN.bz webhook: {e}")
-            raise HTTPException(status_code=400, detail="Failed to parse webhook")
+            raise HTTPException(status_code=400, detail="Failed to parse webhook data")
 
     async def process_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Обработка и нормализация данных EPN.bz"""
         try:
             # Определяем тип события на основе данных
-            event_type = "unknown"
-            if data.get("status") == "confirmed" or data.get("action") == "confirmed":
-                event_type = "order.confirmed"
-            elif data.get("status") == "pending" or data.get("action") == "pending":
-                event_type = "order.pending"
-            elif data.get("status") == "cancelled" or data.get("action") == "cancelled":
-                event_type = "order.cancelled"
-            elif data.get("click_id"):
-                event_type = "click.tracked"
+            event_type = self._determine_event_type(data)
 
             # Нормализация данных к единому формату
             processed_data = {
                 "partner": "epn_bz",
                 "event_type": event_type,
-                "transaction_id": data.get("click_id") or data.get("transaction_id") or data.get("order_id"),
-                "order_id": data.get("order_id") or data.get("offer_id"),
-                "amount": float(data.get("amount", 0)) if data.get("amount") else 0.0,
-                "commission": float(data.get("commission", 0)) if data.get("commission") else 0.0,
-                "status": data.get("status", "unknown"),
+                "transaction_id": self._extract_transaction_id(data),
+                "order_id": data.get("order_id") or data.get("order_number") or data.get("offer_id"),
+                "amount": self._extract_amount(data, "revenue") or self._extract_amount(data, "amount"),
+                "commission": self._extract_amount(data, "commission") or self._extract_amount(data, "commission_fee"),
+                "status": self._normalize_status(data.get("status") or data.get("order_status")),
                 "currency": data.get("currency", "RUB"),
-                "user_id": data.get("user_id") or data.get("subid"),
+                "user_id": data.get("user_id") or data.get("sub") or data.get("subid"),
                 "offer_id": data.get("offer_id"),
+                "offer_name": data.get("offer_name"),
                 "click_id": data.get("click_id"),
+                "uniq_id": data.get("uniq_id"),
+                "click_time": data.get("click_time"),
+                "time_of_order": data.get("time_of_order"),
                 "client_ip": data.get("_client_ip"),
                 "user_agent": data.get("_user_agent"),
                 "raw_data": data,
                 "processed_at": None  # Будет установлено в базе данных
             }
 
-            # Дополнительная обработка для EPN.bz специфичных полей
-            if data.get("cashback_amount"):
-                processed_data["commission"] = float(data.get("cashback_amount", 0))
-
-            if data.get("shop_id"):
-                processed_data["shop_id"] = data.get("shop_id")
-
-            # Валидация обязательных полей
+            # Валидация и генерация transaction_id если отсутствует
             if not processed_data["transaction_id"]:
-                # Генерируем transaction_id из доступных данных
-                processed_data["transaction_id"] = f"epn_{data.get('order_id', '')}_{data.get('offer_id', '')}".strip('_')
-                if processed_data["transaction_id"] == "epn_":
-                    processed_data["transaction_id"] = f"epn_unknown_{hash(str(data)) % 1000000}"
+                processed_data["transaction_id"] = self._generate_transaction_id(data)
                 logger.warning(f"Generated transaction_id: {processed_data['transaction_id']}")
 
-            logger.info(f"Processed EPN.bz data: transaction_id={processed_data['transaction_id']}, amount={processed_data['amount']}")
+            logger.info(f"Processed EPN.bz data: transaction_id={processed_data['transaction_id']}, amount={processed_data['amount']}, commission={processed_data['commission']}")
             return processed_data
 
         except Exception as e:
             logger.error(f"Error processing EPN.bz data: {e}")
-            raise HTTPException(status_code=400, detail="Failed to process data")
+            raise HTTPException(status_code=400, detail="Failed to process webhook data")
+
+    def _determine_event_type(self, data: Dict[str, Any]) -> str:
+        """Определение типа события"""
+        status = (data.get("status") or data.get("order_status", "")).lower()
+
+        if status in ["confirmed", "approved", "paid"]:
+            return "order.confirmed"
+        elif status in ["pending", "hold", "waiting"]:
+            return "order.pending"
+        elif status in ["cancelled", "rejected", "declined", "canceled"]:
+            return "order.cancelled"
+        elif data.get("click_id"):
+            return "click.tracked"
+        else:
+            return "event.unknown"
+
+    def _extract_transaction_id(self, data: Dict[str, Any]) -> Optional[str]:
+        """Извлечение transaction_id из различных полей"""
+        return (data.get("click_id") or 
+                data.get("transaction_id") or 
+                data.get("uniq_id") or
+                data.get("order_id") or 
+                data.get("order_number"))
+
+    def _extract_amount(self, data: Dict[str, Any], field: str) -> float:
+        """Безопасное извлечение суммы"""
+        try:
+            value = data.get(field, 0)
+            return float(value) if value else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _normalize_status(self, status: Optional[str]) -> str:
+        """Нормализация статуса"""
+        if not status:
+            return "unknown"
+
+        status_lower = status.lower()
+        if status_lower in ["confirmed", "approved", "paid"]:
+            return "confirmed"
+        elif status_lower in ["pending", "hold", "waiting"]:
+            return "pending"
+        elif status_lower in ["cancelled", "rejected", "declined", "canceled"]:
+            return "cancelled"
+        else:
+            return status_lower
+
+    def _generate_transaction_id(self, data: Dict[str, Any]) -> str:
+        """Генерация transaction_id из доступных данных"""
+        parts = []
+        if data.get('order_number'):
+            parts.append(f"order_{data['order_number']}")
+        if data.get('user_id'):
+            parts.append(f"user_{data['user_id']}")
+        if data.get('offer_id'):
+            parts.append(f"offer_{data['offer_id']}")
+
+        if parts:
+            return "_".join(parts)
+        else:
+            # Генерируем на основе хеша данных
+            import hashlib
+            data_str = json.dumps(data, sort_keys=True)
+            hash_part = hashlib.md5(data_str.encode()).hexdigest()[:8]
+            return f"epn_generated_{hash_part}"
 
     async def validate_request(self, request: Request) -> bool:
         """Дополнительная валидация для EPN.bz"""
         client_ip = self.get_client_ip(request)
         user_agent = request.headers.get("user-agent", "")
 
-        logger.info(f"EPN.bz request validation: IP={client_ip}, UA={user_agent}")
+        logger.info(f"EPN.bz request validation: IP={client_ip}, UA={user_agent[:50]}...")
 
         # Можно добавить дополнительные проверки:
         # 1. Whitelist IP адресов EPN.bz
@@ -546,11 +595,12 @@ class EpnBzPartner(BasePartner):
         return True
 EOF
 
-echo -e "${GREEN}Обновленный класс партнера EPN.bz с проверкой секрета в URL создан${NC}"
+echo -e "${GREEN}Обновленный класс партнера EPN.bz с секретом в пути URL создан${NC}"
 
-# Процессор webhook'ов с поддержкой секрета в URL
+# Процессор webhook'ов с поддержкой секрета в пути URL
 cat > app/webhook_processor.py << 'EOF'
 import logging
+import os
 from typing import Dict, Any
 from fastapi import Request, HTTPException, BackgroundTasks
 
@@ -560,10 +610,11 @@ from database import save_webhook_event
 logger = logging.getLogger(__name__)
 
 class WebhookProcessor:
-    """Основной процессор webhook'ов с поддержкой секрета в URL"""
+    """Основной процессор webhook'ов с поддержкой секрета в пути URL"""
 
     def __init__(self):
         self.partners: Dict[str, BasePartner] = {}
+        self.secret_token = os.getenv("WEBHOOK_SECRET_TOKEN")
         logger.info("WebhookProcessor initialized")
 
     def register_partner(self, partner_id: str, partner: BasePartner):
@@ -571,25 +622,39 @@ class WebhookProcessor:
         self.partners[partner_id] = partner
         logger.info(f"Registered partner: {partner_id}")
 
-    async def process_webhook(
+    async def process_webhook_with_path_secret(
         self, 
-        partner_id: str, 
+        secret_token: str,
         request: Request, 
         background_tasks: BackgroundTasks
     ):
-        """Основная обработка webhook'а с проверкой секрета в URL"""
+        """Обработка webhook'а с проверкой секрета в пути URL"""
         start_time = None
         try:
             import time
             start_time = time.time()
 
-            # Проверка существования партнера
+            # Проверка секретного токена
+            if not self.secret_token:
+                logger.error("Webhook secret token not configured")
+                raise HTTPException(status_code=500, detail="Service configuration error")
+
+            if secret_token != self.secret_token:
+                logger.error(f"Invalid secret token provided: {secret_token[:8]}...")
+                raise HTTPException(status_code=401, detail="Invalid secret token")
+
+            logger.info(f"Valid secret token provided, processing webhook ({request.method})")
+
+            # Определяем партнера (пока используем epn_bz по умолчанию)
+            # В будущем можно расширить логику определения партнера
+            partner_id = self._determine_partner(request)
+
             if partner_id not in self.partners:
                 logger.error(f"Unknown partner: {partner_id}")
-                raise HTTPException(status_code=404, detail=f"Partner {partner_id} not found")
+                raise HTTPException(status_code=404, detail=f"Partner {partner_id} not supported")
 
             partner = self.partners[partner_id]
-            logger.info(f"Processing webhook for partner: {partner_id} ({request.method})")
+            logger.info(f"Processing webhook for partner: {partner_id}")
 
             # Получение тела запроса
             body = await request.body()
@@ -599,10 +664,10 @@ class WebhookProcessor:
                 logger.error(f"Request validation failed for {partner_id}")
                 raise HTTPException(status_code=400, detail="Request validation failed")
 
-            # Проверка секрета/подписи (теперь включает проверку секрета в URL)
-            if not await partner.verify_signature(request, body):
-                logger.error(f"Signature/secret verification failed for {partner_id}")
-                raise HTTPException(status_code=401, detail="Invalid signature or secret")
+            # Дополнительная проверка токена через партнера
+            if not await partner.verify_secret_token(secret_token):
+                logger.error(f"Partner token verification failed for {partner_id}")
+                raise HTTPException(status_code=401, detail="Token verification failed")
 
             # Парсинг данных
             raw_data = await partner.parse_webhook(request, body)
@@ -625,6 +690,7 @@ class WebhookProcessor:
                 "transaction_id": processed_data.get("transaction_id"),
                 "event_type": processed_data.get("event_type"),
                 "amount": processed_data.get("amount"),
+                "commission": processed_data.get("commission"),
                 "processing_time": f"{processing_time:.3f}s",
                 "message": "Webhook processed successfully"
             }
@@ -633,13 +699,35 @@ class WebhookProcessor:
             raise
         except Exception as e:
             processing_time = time.time() - start_time if start_time else 0
-            logger.error(f"Error processing webhook for {partner_id} after {processing_time:.3f}s: {e}", exc_info=True)
+            logger.error(f"Error processing webhook after {processing_time:.3f}s: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
+
+    def _determine_partner(self, request: Request) -> str:
+        """Определение партнера на основе запроса"""
+        # Пока возвращаем epn_bz по умолчанию
+        # В будущем можно добавить логику определения по:
+        # - User-Agent
+        # - Заголовкам
+        # - Структуре данных
+        # - Дополнительным параметрам в URL
+
+        user_agent = request.headers.get("user-agent", "").lower()
+
+        # Примеры определения партнера:
+        if "epn" in user_agent:
+            return "epn_bz"
+        elif "admitad" in user_agent:
+            return "admitad"  # Когда добавим
+        elif "cityads" in user_agent:
+            return "cityads"  # Когда добавим
+
+        # По умолчанию - EPN.bz
+        return "epn_bz"
 EOF
 
-echo -e "${GREEN}Процессор webhook'ов с поддержкой секрета создан${NC}"
+echo -e "${GREEN}Процессор webhook'ов с поддержкой секрета в пути URL создан${NC}"
 
-# Модуль для работы с базой данных
+# Используем тот же модуль базы данных (без изменений)
 cat > app/database.py << 'EOF'
 import os
 import logging
@@ -714,8 +802,12 @@ async def init_db():
                 `currency` varchar(3) DEFAULT 'RUB' COMMENT 'Валюта',
                 `user_id` varchar(255) DEFAULT NULL COMMENT 'ID пользователя',
                 `offer_id` varchar(255) DEFAULT NULL COMMENT 'ID оффера/товара',
+                `offer_name` varchar(500) DEFAULT NULL COMMENT 'Название оффера/товара',
                 `click_id` varchar(255) DEFAULT NULL COMMENT 'ID клика',
+                `uniq_id` varchar(255) DEFAULT NULL COMMENT 'Уникальный ID',
                 `shop_id` varchar(255) DEFAULT NULL COMMENT 'ID магазина',
+                `click_time` varchar(50) DEFAULT NULL COMMENT 'Время клика',
+                `time_of_order` varchar(50) DEFAULT NULL COMMENT 'Время заказа',
                 `client_ip` varchar(45) DEFAULT NULL COMMENT 'IP адрес клиента',
                 `user_agent` text COMMENT 'User Agent браузера',
                 `raw_data` json DEFAULT NULL COMMENT 'Исходные данные webhook',
@@ -729,7 +821,9 @@ async def init_db():
                 KEY `idx_transaction_id` (`transaction_id`),
                 KEY `idx_partner_created` (`partner`, `created_at`),
                 KEY `idx_status_amount` (`status`, `amount`),
-                KEY `idx_event_type` (`event_type`)
+                KEY `idx_event_type` (`event_type`),
+                KEY `idx_user_id` (`user_id`),
+                KEY `idx_click_id` (`click_id`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci 
               COMMENT='Таблица для хранения событий от webhook партнеров'
             """
@@ -755,13 +849,14 @@ async def save_webhook_event(data: Dict[str, Any]) -> bool:
             insert_sql = f"""
             INSERT INTO `{TABLE_NAME}` 
             (partner, event_type, transaction_id, order_id, amount, commission, 
-             status, currency, user_id, offer_id, click_id, shop_id, 
-             client_ip, user_agent, raw_data)
+             status, currency, user_id, offer_id, offer_name, click_id, uniq_id,
+             shop_id, click_time, time_of_order, client_ip, user_agent, raw_data)
             VALUES 
             (%(partner)s, %(event_type)s, %(transaction_id)s, %(order_id)s, 
              %(amount)s, %(commission)s, %(status)s, %(currency)s, 
-             %(user_id)s, %(offer_id)s, %(click_id)s, %(shop_id)s,
-             %(client_ip)s, %(user_agent)s, %(raw_data)s)
+             %(user_id)s, %(offer_id)s, %(offer_name)s, %(click_id)s, %(uniq_id)s,
+             %(shop_id)s, %(click_time)s, %(time_of_order)s, %(client_ip)s, 
+             %(user_agent)s, %(raw_data)s)
             ON DUPLICATE KEY UPDATE
             event_type = VALUES(event_type),
             order_id = VALUES(order_id),
@@ -771,8 +866,12 @@ async def save_webhook_event(data: Dict[str, Any]) -> bool:
             currency = VALUES(currency),
             user_id = VALUES(user_id),
             offer_id = VALUES(offer_id),
+            offer_name = VALUES(offer_name),
             click_id = VALUES(click_id),
+            uniq_id = VALUES(uniq_id),
             shop_id = VALUES(shop_id),
+            click_time = VALUES(click_time),
+            time_of_order = VALUES(time_of_order),
             client_ip = VALUES(client_ip),
             user_agent = VALUES(user_agent),
             raw_data = VALUES(raw_data),
@@ -791,8 +890,12 @@ async def save_webhook_event(data: Dict[str, Any]) -> bool:
                 'currency': data.get('currency', 'RUB'),
                 'user_id': data.get('user_id'),
                 'offer_id': data.get('offer_id'),
+                'offer_name': data.get('offer_name'),
                 'click_id': data.get('click_id'),
+                'uniq_id': data.get('uniq_id'),
                 'shop_id': data.get('shop_id'),
+                'click_time': data.get('click_time'),
+                'time_of_order': data.get('time_of_order'),
                 'client_ip': data.get('client_ip'),
                 'user_agent': data.get('user_agent'),
                 'raw_data': json.dumps(data.get('raw_data', {}), ensure_ascii=False)
@@ -811,251 +914,73 @@ async def save_webhook_event(data: Dict[str, Any]) -> bool:
             logger.info("Duplicate webhook event - updated existing record")
             return True
         return False
-
-async def get_webhook_stats() -> Optional[Dict[str, Any]]:
-    """Получение статистики webhook'ов"""
-    try:
-        connection = get_db_connection()
-        if not connection:
-            return None
-
-        with connection.cursor() as cursor:
-            # Общая статистика по партнерам
-            stats_sql = f"""
-            SELECT 
-                partner,
-                COUNT(*) as total_events,
-                COUNT(DISTINCT transaction_id) as unique_transactions,
-                SUM(amount) as total_amount,
-                SUM(commission) as total_commission,
-                COUNT(CASE WHEN status = 'confirmed' THEN 1 END) as confirmed_count,
-                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count,
-                COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_count,
-                MIN(created_at) as first_event,
-                MAX(created_at) as last_event
-            FROM `{TABLE_NAME}`
-            GROUP BY partner
-            ORDER BY total_events DESC
-            """
-
-            cursor.execute(stats_sql)
-            results = cursor.fetchall()
-
-            # Статистика за сегодня
-            today_sql = f"""
-            SELECT 
-                partner,
-                COUNT(*) as today_events,
-                SUM(amount) as today_amount,
-                SUM(commission) as today_commission
-            FROM `{TABLE_NAME}`
-            WHERE DATE(created_at) = CURDATE()
-            GROUP BY partner
-            """
-
-            cursor.execute(today_sql)
-            today_results = cursor.fetchall()
-
-        connection.close()
-
-        return {
-            "total_stats": results,
-            "today_stats": today_results,
-            "generated_at": datetime.now().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting webhook stats: {e}")
-        return None
 EOF
 
 echo -e "${GREEN}Модуль базы данных создан${NC}"
 
-# Создание SQL скрипта для инициализации
-mkdir -p scripts
+# README файл с инструкциями
+cat > README.md << EOF
+# Universal Webhook Service - Секрет в пути URL
 
-cat > scripts/init_webhook_table.sql << 'EOF'
--- Создание таблицы для webhook событий с поддержкой секрета в URL
-CREATE TABLE IF NOT EXISTS `webhook_events` (
-    `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-    `partner` varchar(50) NOT NULL COMMENT 'Название партнера (epn_bz, admitad, etc)',
-    `event_type` varchar(100) NOT NULL COMMENT 'Тип события (order.confirmed, click.tracked, etc)',
-    `transaction_id` varchar(255) DEFAULT NULL COMMENT 'Уникальный ID транзакции',
-    `order_id` varchar(255) DEFAULT NULL COMMENT 'ID заказа',
-    `amount` decimal(15,2) DEFAULT 0.00 COMMENT 'Сумма заказа',
-    `commission` decimal(15,2) DEFAULT 0.00 COMMENT 'Размер комиссии/кешбэка',
-    `status` varchar(50) NOT NULL COMMENT 'Статус события (confirmed, pending, cancelled)',
-    `currency` varchar(3) DEFAULT 'RUB' COMMENT 'Валюта',
-    `user_id` varchar(255) DEFAULT NULL COMMENT 'ID пользователя',
-    `offer_id` varchar(255) DEFAULT NULL COMMENT 'ID оффера/товара',
-    `click_id` varchar(255) DEFAULT NULL COMMENT 'ID клика',
-    `shop_id` varchar(255) DEFAULT NULL COMMENT 'ID магазина',
-    `client_ip` varchar(45) DEFAULT NULL COMMENT 'IP адрес клиента',
-    `user_agent` text COMMENT 'User Agent браузера',
-    `raw_data` json DEFAULT NULL COMMENT 'Исходные данные webhook в формате JSON',
-    `processed_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Время обработки webhook',
-    `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Время создания записи',
-    `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Время последнего обновления',
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `unique_partner_transaction` (`partner`, `transaction_id`),
-    KEY `idx_partner_status` (`partner`, `status`),
-    KEY `idx_created_at` (`created_at`),
-    KEY `idx_transaction_id` (`transaction_id`),
-    KEY `idx_partner_created` (`partner`, `created_at`),
-    KEY `idx_status_amount` (`status`, `amount`),
-    KEY `idx_event_type` (`event_type`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci 
-  COMMENT='Таблица для хранения событий от webhook партнеров с поддержкой секрета в URL';
-
--- Создание дополнительных индексов для оптимизации
-CREATE INDEX idx_partner_event_type ON webhook_events(partner, event_type);
-CREATE INDEX idx_amount_commission ON webhook_events(amount, commission);
-CREATE INDEX idx_date_partner ON webhook_events(DATE(created_at), partner);
-EOF
-
-# README файл с инструкциями по использованию секрета в URL
-cat > README.md << 'EOF'
-# Universal Webhook Service с поддержкой секрета в URL
-
-Универсальный сервис для приема webhook'ов от различных партнерских программ с проверкой секрета через URL параметры.
+Универсальный сервис для приема webhook'ов с секретом в пути URL.
 
 ## Архитектура
 
-```
-Партнеры → FastAPI (с секретом в URL) → Svix → MariaDB
-```
+\`\`\`
+Партнеры → FastAPI (секрет в URL path) → Svix → MariaDB
+\`\`\`
 
-## Установка
+## URL Format
 
-1. Запустите установочный скрипт:
-```bash
-bash install_svix_updated.sh
-```
+**Формат URL:**
+\`\`\`
+https://webhook.yourdomain.com/webhook/{SECRET_TOKEN}
+\`\`\`
 
-2. Сервис будет доступен по адресам:
-- Svix Dashboard: https://your-domain.com
-- Webhook Receiver: https://webhook.your-domain.com
+**Пример:**
+\`\`\`
+https://webhook.comfyui.autmatization-bot.ru/webhook/71df03c1eb976689e60c9136c7c72ffdcdca2d216b6858f678b75306391b6893
+\`\`\`
 
 ## Использование
 
-### URL для настройки у партнеров:
+### Настройка у партнеров:
+- URL: \`https://webhook.yourdomain.com/webhook/YOUR_SECRET_TOKEN\`
+- Поддерживает POST и GET запросы
+- Параметры передаются обычным способом: \`?param1=value1&param2=value2\`
 
-**EPN.bz:**
-```
-https://webhook.your-domain.com/webhook/epn_bz?secret=YOUR_GENERATED_SECRET
-```
-
-**Другие партнеры:**
-```
-https://webhook.your-domain.com/webhook/{partner_id}?secret=YOUR_GENERATED_SECRET
-```
-
-### Секрет в URL
-
-- Секрет генерируется автоматически при установке
-- Секрет передается как GET параметр `?secret=...`
-- Работает для POST и GET запросов
-- Без правильного секрета запрос будет отклонен с ошибкой 401
-
-### Поддерживаемые методы:
-
-- **POST** `/webhook/epn_bz?secret=...` - основной метод для webhook'ов
-- **GET** `/webhook/epn_bz?secret=...` - для партнеров использующих GET
-
-### Endpoint'ы сервиса:
-
-- `/` - информация о сервисе и примеры URL
-- `/health` - проверка работоспособности
-- `/webhook/{partner_id}` - прием webhook'ов
-
-## Добавление нового партнера
-
-1. Создайте новый файл `app/partners/new_partner.py`
-2. Наследуйтесь от `BasePartner`
-3. Реализуйте методы:
-   - `verify_signature()` - проверка секрета (используйте `self.verify_secret_in_url()`)
-   - `parse_webhook()` - парсинг данных
-   - `process_data()` - нормализация данных
-4. Зарегистрируйте в `main.py`:
-   ```python
-   webhook_processor.register_partner("new_partner", NewPartner(WEBHOOK_SECRET))
-   ```
-
-## Мониторинг
-
-- Health check: `https://webhook.your-domain.com/health`
-- Логи: `docker-compose logs -f webhook_receiver`
-- Статистика в таблице `webhook_events`
-
-## Структура данных
-
-Все webhook'и нормализуются к единому формату:
-- `partner`: название партнера (epn_bz, admitad, etc)
-- `event_type`: тип события (order.confirmed, click.tracked, etc)
-- `transaction_id`: уникальный ID транзакции
-- `amount`: сумма заказа
-- `commission`: размер кешбэка
-- `status`: статус события (confirmed, pending, cancelled)
-- `raw_data`: исходные данные в JSON
+### Пример полного URL с параметрами:
+\`\`\`
+https://webhook.comfyui.autmatization-bot.ru/webhook/71df03c1eb976689e60c9136c7c72ffdcdca2d216b6858f678b75306391b6893?click_id=test123&order_number=50&offer_name=TestOffer&order_status=confirmed&user_id=6&revenue=1500&commission=100
+\`\`\`
 
 ## Безопасность
 
-- ✅ Проверка секрета в URL параметрах
-- ✅ Валидация IP адресов (настраивается)
-- ✅ Rate limiting через Svix
-- ✅ Дедупликация событий через UNIQUE constraint
-- ✅ Подробное логирование всех запросов
-- ✅ HTTPS через Traefik + Let's Encrypt
+- ✅ 64-символьный hex токен в пути URL
+- ✅ Проверка токена перед обработкой
+- ✅ Логирование всех попыток доступа
+- ✅ HTTP 401 при неверном токене
 
-## Примеры тестирования
+## Поддерживаемые поля EPN.bz
 
-### POST запрос с JSON:
-```bash
-curl -X POST "https://webhook.your-domain.com/webhook/epn_bz?secret=YOUR_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"click_id":"test123","amount":"100.50","status":"confirmed","order_id":"ORDER123"}'
-```
+- click_id, order_number, order_id
+- offer_name, offer_id
+- order_status, status
+- user_id, sub, subid
+- revenue, amount
+- commission, commission_fee
+- uniq_id
+- click_time, time_of_order
 
-### GET запрос с параметрами:
-```bash
-curl -X GET "https://webhook.your-domain.com/webhook/epn_bz?secret=YOUR_SECRET&click_id=test456&amount=75.25&status=pending"
-```
+## Запуск
 
-### Проверка здоровья:
-```bash
-curl "https://webhook.your-domain.com/health"
-```
-
-## Логи и отладка
-
-```bash
-# Просмотр логов webhook receiver
-docker-compose logs -f webhook_receiver
-
-# Просмотр логов Svix
-docker-compose logs -f svix_server
-
-# Просмотр всех логов
-docker-compose logs -f
-```
-
-## База данных
-
-Просмотр данных в MariaDB:
-```sql
--- Последние события
-SELECT * FROM webhook_events ORDER BY created_at DESC LIMIT 10;
-
--- Статистика по партнерам
-SELECT partner, COUNT(*) as events, SUM(amount) as total_amount 
-FROM webhook_events GROUP BY partner;
-
--- События за сегодня
-SELECT * FROM webhook_events WHERE DATE(created_at) = CURDATE();
-```
+\`\`\`bash
+bash install_svix_path_secret.sh
+\`\`\`
 
 EOF
 
+# Завершающая часть установки
 echo -e "${YELLOW}Запуск установки...${NC}"
 
 # Создание сетей если не существуют
@@ -1074,28 +999,31 @@ sleep 30
 echo -e "${BLUE}Проверка статуса сервисов:${NC}"
 docker-compose ps
 
-echo -e "${GREEN}=== Установка завершена! ===${NC}"
+echo -e "${GREEN}=== УСТАНОВКА ЗАВЕРШЕНА! ===${NC}"
 echo -e "${BLUE}Сервисы доступны по адресам:${NC}"
 echo -e "Svix Dashboard: https://${DOMAIN}"
-echo -e "Webhook Receiver: https://webhook.${DOMAIN}"
-echo -e "Health Check: https://webhook.${DOMAIN}/health"
+echo -e "Webhook Receiver: https://${WEBHOOK_DOMAIN}"
+echo -e "Health Check: https://${WEBHOOK_DOMAIN}/health"
 echo ""
-echo -e "${GREEN}=== ПОЛНЫЙ URL ДЛЯ EPN.BZ ===${NC}"
-echo -e "${YELLOW}https://webhook.${DOMAIN}/webhook/epn_bz?secret=${WEBHOOK_SECRET}${NC}"
+echo -e "${GREEN}=== ПОЛНЫЙ WEBHOOK URL ===${NC}"
+echo -e "${YELLOW}${FULL_WEBHOOK_URL}${NC}"
 echo ""
-echo -e "${BLUE}Тестовые webhook'и:${NC}"
+echo -e "${BLUE}Примеры использования:${NC}"
 echo ""
 echo -e "${YELLOW}POST запрос с JSON:${NC}"
-echo -e "curl -X POST 'https://webhook.${DOMAIN}/webhook/epn_bz?secret=${WEBHOOK_SECRET}' \\"
+echo -e "curl -X POST '${FULL_WEBHOOK_URL}' \\"
 echo -e "  -H 'Content-Type: application/json' \\"
-echo -e "  -d '{"click_id":"test123","amount":"100.50","status":"confirmed","order_id":"ORDER123"}'"
+echo -e "  -d '{"click_id":"test123","order_number":"50","offer_name":"TestOffer","order_status":"confirmed","user_id":"6","revenue":"1500","commission":"100"}'"
 echo ""
 echo -e "${YELLOW}GET запрос с параметрами:${NC}"
-echo -e "curl 'https://webhook.${DOMAIN}/webhook/epn_bz?secret=${WEBHOOK_SECRET}&click_id=test456&amount=75.25&status=pending'"
+echo -e "curl '${FULL_WEBHOOK_URL}?click_id=test456&order_number=75&offer_name=TestOffer2&order_status=pending&user_id=7&revenue=2000&commission=150'"
+echo ""
+echo -e "${YELLOW}Полный пример URL с параметрами:${NC}"
+echo -e "${FULL_WEBHOOK_URL}?click_id=test123&order_number=50&offer_name=TestOffer&order_status=confirmed&user_id=6&revenue=1500&commission=100&uniq_id=uniq3w3w&click_time=2025-10-22%2020:00:00&time_of_order=2025-10-22%2020:01:00"
 echo ""
 echo -e "${BLUE}Для просмотра логов:${NC}"
 echo -e "docker-compose logs -f webhook_receiver"
 echo -e "docker-compose logs -f svix_server"
 echo ""
-echo -e "${GREEN}Секрет для webhook URL: ${WEBHOOK_SECRET}${NC}"
-echo -e "${GREEN}Сохраните этот секрет - он нужен для настройки у партнеров!${NC}"
+echo -e "${GREEN}Секретный токен: ${WEBHOOK_SECRET_TOKEN}${NC}"
+echo -e "${GREEN}Сохраните этот URL - используйте его для настройки у партнеров!${NC}"
