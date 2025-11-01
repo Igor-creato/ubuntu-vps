@@ -72,7 +72,7 @@ echo -e "${YELLOW}Создание файлов проекта...${NC}"
 # .env файл
 cat > .env << EOF
 # Database Configuration
-DATABASE_URL=mysql://${DB_USER}:${DB_PASSWORD}@mariadb:3306/${DB_NAME}
+DATABASE_URL=mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
 DB_USER=${DB_USER}
 DB_PASSWORD=${DB_PASSWORD}
 DB_NAME=${DB_NAME}
@@ -533,7 +533,6 @@ echo -e "${GREEN}Исправленный класс EPN.bz с правильн�
 
 # Docker Compose файл (без изменений)
 cat > docker-compose.yml << 'EOF'
-version: '3.8'
 
 networks:
   proxy:
@@ -591,7 +590,7 @@ services:
   webhook_receiver:
     build: ./app
     environment:
-      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@mariadb:3306/${DB_NAME}
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
       WEBHOOK_SECRET_TOKEN: ${WEBHOOK_SECRET_TOKEN}
       TABLE_NAME: ${TABLE_NAME}
       SVIX_API_URL: http://svix_server:8071
