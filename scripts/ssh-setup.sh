@@ -503,8 +503,23 @@ check_verify_dependencies() {
 acquire_lock() { mkdir -p "$(dirname "$LOCK_FILE")"; exec 9>"$LOCK_FILE"; flock -n 9 || error_exit "Другой экземпляр настройки SSH уже выполняется"; }
 
 prompt_missing_inputs() {
-    if [[ -z "$USERNAME" ]]; then read -r -p "Имя административного пользователя: " USERNAME; validate_username "$USERNAME" || error_exit "Некорректное имя пользователя"; fi
-    if [[ -z "$SSHD_PORT" ]]; then read -r -p "Новый SSH-порт (1-65535): " SSHD_PORT; validate_port "$SSHD_PORT" || error_exit "Некорректный SSH-порт"; fi
+    # Check if stdin is available for interactive input
+    if [[ ! -t 0 ]]; then
+        # Non-interactive mode (pipe or no terminal)
+        [[ -z "$USERNAME" ]] && error_exit "USERNAME не задан в неинтерактивном режиме"
+        [[ -z "$SSHD_PORT" ]] && error_exit "SSHD_PORT не задан в неинтерактивном режиме"
+        return 0
+    fi
+
+    # Interactive mode
+    if [[ -z "$USERNAME" ]]; then
+        read -r -p "Имя административного пользователя: " USERNAME
+        validate_username "$USERNAME" || error_exit "Некорректное имя пользователя"
+    fi
+    if [[ -z "$SSHD_PORT" ]]; then
+        read -r -p "Новый SSH-порт (1-65535): " SSHD_PORT
+        validate_port "$SSHD_PORT" || error_exit "Некорректный SSH-порт"
+    fi
 }
 
 ensure_user() {
