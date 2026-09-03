@@ -26,14 +26,16 @@ readonly BLUE='\033[0;34m'
 readonly NC='\033[0m' # No Color
 
 # Параметры для ssh-setup.sh (можно прокинуть окружением)
-USERNAME="${USERNAME-}"
-SSH_PORT="${SSH_PORT-}"
+# Игнорируем системную переменную USERNAME (которая часто равна root)
+# и используем только явно заданные значения
+VPS_USERNAME="${VPS_USERNAME-}"
+VPS_SSH_PORT="${VPS_SSH_PORT-}"
 PUBLIC_KEY_FILE="${PUBLIC_KEY_FILE-}"
 errors=0
 
 build_ssh_child_args() {
-  [[ -z "${USERNAME:-}" ]] || printf '%s\n' --user "$USERNAME"
-  [[ -z "${SSH_PORT:-}" ]] || printf '%s\n' --port "$SSH_PORT"
+  [[ -z "${VPS_USERNAME:-}" ]] || printf '%s\n' --user "$VPS_USERNAME"
+  [[ -z "${VPS_SSH_PORT:-}" ]] || printf '%s\n' --port "$VPS_SSH_PORT"
   [[ -z "${PUBLIC_KEY_FILE:-}" ]] || printf '%s\n' --public-key-file "$PUBLIC_KEY_FILE"
 }
 
@@ -74,21 +76,21 @@ build_update_arguments() {
 prompt_ssh_inputs() {
   if [[ -t 0 ]]; then
     # stdin является терминалом - можно использовать read
-    if [[ -z "${USERNAME:-}" ]]; then
-      read -r -p "Имя административного пользователя: " USERNAME
+    if [[ -z "${VPS_USERNAME:-}" ]]; then
+      read -r -p "Имя административного пользователя: " VPS_USERNAME
     fi
-    if [[ -z "${SSH_PORT:-}" ]]; then
-      read -r -p "Новый SSH-порт (1-65535): " SSH_PORT
+    if [[ -z "${VPS_SSH_PORT:-}" ]]; then
+      read -r -p "Новый SSH-порт (1-65535): " VPS_SSH_PORT
     fi
   else
     # stdin не терминал (pipe) - используем значения по умолчанию
-    if [[ -z "${USERNAME:-}" ]]; then
-      USERNAME="${DEFAULT_USERNAME:-admin}"
-      log "INFO" "Используется имя пользователя по умолчанию: $USERNAME"
+    if [[ -z "${VPS_USERNAME:-}" ]]; then
+      VPS_USERNAME="${DEFAULT_USERNAME:-admin}"
+      log "INFO" "Используется имя пользователя по умолчанию: $VPS_USERNAME"
     fi
-    if [[ -z "${SSH_PORT:-}" ]]; then
-      SSH_PORT="${DEFAULT_SSH_PORT:-2222}"
-      log "INFO" "Используется SSH-порт по умолчанию: $SSH_PORT"
+    if [[ -z "${VPS_SSH_PORT:-}" ]]; then
+      VPS_SSH_PORT="${DEFAULT_SSH_PORT:-2222}"
+      log "INFO" "Используется SSH-порт по умолчанию: $VPS_SSH_PORT"
     fi
   fi
 }
@@ -253,12 +255,13 @@ safe_execute_remote_script() {
   fi
 
   # Экспорт совместимых переменных окружения (на случай, если подскрипт обращается к $user)
-  if [[ -n "${USERNAME:-}" ]]; then
-    export USERNAME
-    export user="$USERNAME"
+  if [[ -n "${VPS_USERNAME:-}" ]]; then
+    export VPS_USERNAME
+    export user="$VPS_USERNAME"
   fi
-  if [[ -n "${SSH_PORT:-}" ]]; then
-    export SSH_PORT
+  if [[ -n "${VPS_SSH_PORT:-}" ]]; then
+    export VPS_SSH_PORT
+    export SSH_PORT="$VPS_SSH_PORT"
   fi
 
   if bash "$temp_script" "$@"; then
@@ -286,8 +289,8 @@ $SCRIPT_NAME v$SCRIPT_VERSION
   --docker              Установка Docker
   --ufw                 Установка и настройка UFW
   --fail2ban            Установка и настройка Fail2ban
-  --username NAME       Имя пользователя для ssh-setup.sh  (альтернатива: переменная окружения USERNAME)
-  --ssh-port PORT       Порт SSH для ssh-setup.sh          (альтернатива: переменная окружения SSH_PORT)
+  --username NAME       Имя пользователя для ssh-setup.sh  (альтернатива: переменная окружения VPS_USERNAME)
+  --ssh-port PORT       Порт SSH для ssh-setup.sh          (альтернатива: переменная окружения VPS_SSH_PORT)
   --public-key-file PATH Публичный ключ/authorized_keys для ssh-setup.sh
   --help, -h            Показать справку
   --version             Показать версию
@@ -296,7 +299,7 @@ $SCRIPT_NAME v$SCRIPT_VERSION
   $SCRIPT_NAME
   $SCRIPT_NAME --ssh --docker
   $SCRIPT_NAME --ssh --username igor --ssh-port 55555
-  USERNAME=admin SSH_PORT=2222 $SCRIPT_NAME --ssh
+  VPS_USERNAME=admin VPS_SSH_PORT=2222 $SCRIPT_NAME --ssh
 EOF
 }
 
@@ -338,11 +341,11 @@ parse_args() {
       --fail2ban)   _install_fail2ban=true ;;
       --username)
         [[ $# -ge 2 ]] || { log "ERROR" "Для --username требуется значение"; return 2; }
-        USERNAME="$2"; shift
+        VPS_USERNAME="$2"; shift
         ;;
       --ssh-port)
         [[ $# -ge 2 ]] || { log "ERROR" "Для --ssh-port требуется значение"; return 2; }
-        SSH_PORT="$2"; shift
+        VPS_SSH_PORT="$2"; shift
         ;;
       --public-key-file)
         [[ $# -ge 2 ]] || { log "ERROR" "Для --public-key-file требуется значение"; return 2; }
