@@ -22,8 +22,27 @@ ssh-keygen -t ed25519 -C "your_email@example.com"
 
 ### Запуск скрипта
 
+**Автоматический режим (рекомендуется):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/install.sh | sudo bash
+```
+
+При запуске через pipe (curl | bash) скрипт использует значения по умолчанию:
+- Имя пользователя: `admin`
+- SSH порт: `2222`
+
+**Интерактивный режим:**
+
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/install.sh)
+```
+
+**С явными параметрами:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/install.sh | \
+  sudo bash -s -- --username igor --ssh-port 2222 --ssh --ufw --fail2ban
 ```
 
 ## 📋 Что делает скрипт
@@ -229,18 +248,22 @@ ubuntu-vps/
 
 ## 🧪 Тестирование
 
-Скрипты покрыты тестами:
+Скрипты покрыты автоматическими тестами:
 
 ```bash
-# Запуск всех тестов
-sudo bash tests/run.sh
+# SSH setup тесты (проверка функций и логики)
+bash tests/test-ssh-setup.sh
 
-# Только SSH тесты
-sudo bash tests/test_ssh_setup.sh
-
-# Integration тесты
-sudo bash tests/test_install.sh
+# Install.sh тесты (проверка pipe mode и синтаксиса)
+bash tests/test-install.sh
 ```
+
+**Что проверяют тесты:**
+- ✅ Синтаксис всех bash скриптов
+- ✅ Определение бинарных путей (/usr/sbin/ss, ufw, fail2ban)
+- ✅ Корректная работа функции ensure_user с существующими группами
+- ✅ Поддержка pipe mode (curl | bash) без зависания на read
+- ✅ Валидация портов, имён пользователей, SSH ключей
 
 ## 🤝 Поддержка
 
