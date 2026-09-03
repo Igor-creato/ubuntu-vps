@@ -72,11 +72,24 @@ build_update_arguments() {
 }
 
 prompt_ssh_inputs() {
-  if [[ -z "${USERNAME:-}" ]]; then
-    read -r -p "Имя административного пользователя: " USERNAME
-  fi
-  if [[ -z "${SSH_PORT:-}" ]]; then
-    read -r -p "Новый SSH-порт (1-65535): " SSH_PORT
+  if [[ -t 0 ]]; then
+    # stdin является терминалом - можно использовать read
+    if [[ -z "${USERNAME:-}" ]]; then
+      read -r -p "Имя административного пользователя: " USERNAME
+    fi
+    if [[ -z "${SSH_PORT:-}" ]]; then
+      read -r -p "Новый SSH-порт (1-65535): " SSH_PORT
+    fi
+  else
+    # stdin не терминал (pipe) - используем значения по умолчанию
+    if [[ -z "${USERNAME:-}" ]]; then
+      USERNAME="${DEFAULT_USERNAME:-admin}"
+      log "INFO" "Используется имя пользователя по умолчанию: $USERNAME"
+    fi
+    if [[ -z "${SSH_PORT:-}" ]]; then
+      SSH_PORT="${DEFAULT_SSH_PORT:-2222}"
+      log "INFO" "Используется SSH-порт по умолчанию: $SSH_PORT"
+    fi
   fi
 }
 
@@ -85,6 +98,10 @@ confirm_step() {
   local total_steps="$2"
   local description="$3"
   [[ "${VPS_AUTO_CONFIRM:-false}" == true ]] && return 0
+  if [[ ! -t 0 ]]; then
+    # stdin не терминал (pipe) - автоматически подтверждаем
+    return 0
+  fi
   local reply
   echo
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -97,6 +114,11 @@ confirm_step() {
 
 confirm_execution() {
   [[ "${VPS_AUTO_CONFIRM:-false}" == true ]] && return 0
+  if [[ ! -t 0 ]]; then
+    # stdin не терминал (pipe) - автоматически подтверждаем
+    log "INFO" "Автоматическое подтверждение выполнения (pipe mode)"
+    return 0
+  fi
   local reply
   echo
   read -r -p "Начать выполнение? (Y/n): " -n 1 reply
