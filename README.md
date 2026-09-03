@@ -8,6 +8,32 @@ update and upgrade server
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/install.sh)
 ```
 
+Установщик сначала готовит SSH, проверяет конфигурацию и оставляет старый
+listener активным. Для завершения миграции он выведет команду, которую нужно
+выполнить во втором терминале после реального входа новым пользователем и
+ключом. Только после этого отключаются root login, password authentication и
+старый listener.
+
+Параметры можно передать сразу:
+
+```bash
+sudo bash install.sh --ssh --username igor --ssh-port 2222 --public-key-file /root/admin-key.pub
+```
+
+Если `--public-key-file` не задан, используется существующий
+`/root/.ssh/authorized_keys`. Если ни один валидный источник ключа не найден,
+скрипт безопасно остановится до изменения SSH/UFW. Root `authorized_keys`
+никогда не очищается.
+
+Локальные regression-тесты:
+
+```bash
+sudo bash ./tests/run.sh
+```
+
+Системные SSH-тесты требуют disposable Ubuntu 24.04 VM с настоящим systemd;
+обычный Docker-контейнер для проверки `ssh.socket` недостаточен.
+
 install traefik
 
 ```bash

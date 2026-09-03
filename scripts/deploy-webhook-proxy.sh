@@ -23,7 +23,7 @@ DEFAULT_DOMAIN="webhook-proxy.autmatization-bot.ru"
 echo -e "${BLUE}Введите URL вебхука n8n для проксирования:${NC}"
 echo -e "${YELLOW}Пример: https://hook.autmatization-bot.ru/webhook-test/14c9dd84-9c66-46d6-9961-14470a01bcd1${NC}"
 echo -n "URL: "
-read N8N_WEBHOOK_URL
+read -r N8N_WEBHOOK_URL
 
 # Проверка что URL введен
 if [ -z "$N8N_WEBHOOK_URL" ]; then
@@ -41,7 +41,7 @@ echo ""
 echo -e "${BLUE}Введите домен для webhook-proxy (Enter для значения по умолчанию):${NC}"
 echo -e "${YELLOW}По умолчанию: ${DEFAULT_DOMAIN}${NC}"
 echo -n "Домен: "
-read DOMAIN
+read -r DOMAIN
 
 # Использовать значение по умолчанию если не введено
 if [ -z "$DOMAIN" ]; then
@@ -60,7 +60,7 @@ echo -e "  ${YELLOW}Директория проекта:${NC} $PROJECT_DIR"
 echo -e "  ${YELLOW}Сеть Docker:${NC} $EXTERNAL_NETWORK"
 echo ""
 echo -n -e "${BLUE}Продолжить установку? (y/n): ${NC}"
-read CONFIRM
+read -r CONFIRM
 
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
     echo -e "${YELLOW}Установка отменена${NC}"

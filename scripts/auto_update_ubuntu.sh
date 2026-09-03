@@ -182,14 +182,11 @@ systemctl enable --now reboot-notify.timer
 
 # Тестовое сообщение (теперь curl точно установлен)
 echo "[*] Отправляю тестовое сообщение в Telegram…"
-set +e
-curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+if ! curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
      --data-urlencode "chat_id=${CHAT_ID}" \
-     --data-urlencode "text=✅ Скрипт установки автообновлений запущен на $(hostname)." >/dev/null
-if [[ $? -ne 0 ]]; then
+     --data-urlencode "text=✅ Скрипт установки автообновлений запущен на $(hostname)." >/dev/null; then
   echo "[WARN] Не удалось отправить тестовое сообщение. Проверьте BOT_TOKEN/CHAT_ID и доступ в Интернет."
 fi
-set -e
 
 # Первая проверка вручную
 echo "[*] Выполняю первую проверку необходимости перезагрузки…"

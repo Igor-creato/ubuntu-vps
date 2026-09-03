@@ -24,6 +24,8 @@ done
 
 cleanup() {
   # очистка чувствительных переменных из окружения
+  # This function is reached indirectly through the EXIT trap.
+  # shellcheck disable=SC2317
   unset BOT_TOKEN API LAST_UPDATE_ID
 }
 trap cleanup EXIT

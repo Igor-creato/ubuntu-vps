@@ -28,39 +28,40 @@ fi
 
 # Создание директории
 echo -e "${YELLOW}Создание папки svix...${NC}"
-mkdir -p svix && cd svix
+mkdir -p svix
+cd svix || exit 1
 
 # Запрос параметров
 echo -e "${BLUE}Настройка параметров:${NC}"
 
-read -p "Введите домен для веб-интерфейса (например svix.yourdomain.com): " DOMAIN
+read -r -p "Введите домен для веб-интерфейса (например svix.yourdomain.com): " DOMAIN
 if [ -z "$DOMAIN" ]; then
     echo -e "${RED}Домен обязателен!${NC}"
     exit 1
 fi
 
-read -p "Введите название таблицы для webhook данных [webhook_events]: " TABLE_NAME
+read -r -p "Введите название таблицы для webhook данных [webhook_events]: " TABLE_NAME
 TABLE_NAME=${TABLE_NAME:-webhook_events}
 
-read -p "Введите логин MariaDB: " DB_USER
+read -r -p "Введите логин MariaDB: " DB_USER
 if [ -z "$DB_USER" ]; then
     echo -e "${RED}Логин обязателен!${NC}"
     exit 1
 fi
 
-read -s -p "Введите пароль MariaDB: " DB_PASSWORD
+read -r -s -p "Введите пароль MariaDB: " DB_PASSWORD
 echo
 if [ -z "$DB_PASSWORD" ]; then
     echo -e "${RED}Пароль обязателен!${NC}"
     exit 1
 fi
 
-read -p "Введите название базы данных [wordpress]: " DB_NAME
+read -r -p "Введите название базы данных [wordpress]: " DB_NAME
 DB_NAME=${DB_NAME:-wordpress}
 
 echo -e "${BLUE}Настройка email уведомлений об ошибках:${NC}"
 
-read -p "Введите email для уведомлений об ошибках: " ALERT_EMAIL
+read -r -p "Введите email для уведомлений об ошибках: " ALERT_EMAIL
 if [ -z "$ALERT_EMAIL" ]; then
     echo -e "${YELLOW}Email не указан - уведомления будут отключены${NC}"
     SMTP_USERNAME=""
@@ -69,16 +70,16 @@ if [ -z "$ALERT_EMAIL" ]; then
     SMTP_PORT="587"
     FROM_EMAIL=""
 else
-    read -p "Введите SMTP сервер [smtp.gmail.com]: " SMTP_SERVER
+    read -r -p "Введите SMTP сервер [smtp.gmail.com]: " SMTP_SERVER
     SMTP_SERVER=${SMTP_SERVER:-smtp.gmail.com}
 
-    read -p "Введите SMTP порт [587]: " SMTP_PORT
+    read -r -p "Введите SMTP порт [587]: " SMTP_PORT
     SMTP_PORT=${SMTP_PORT:-587}
 
-    read -p "Введите email для отправки уведомлений [${ALERT_EMAIL}]: " SMTP_USERNAME
+    read -r -p "Введите email для отправки уведомлений [${ALERT_EMAIL}]: " SMTP_USERNAME
     SMTP_USERNAME=${SMTP_USERNAME:-$ALERT_EMAIL}
 
-    read -s -p "Введите пароль для email (для Gmail используйте App Password): " SMTP_PASSWORD
+    read -r -s -p "Введите пароль для email (для Gmail используйте App Password): " SMTP_PASSWORD
     echo
     if [ -z "$SMTP_PASSWORD" ]; then
         echo -e "${YELLOW}Пароль не указан - email уведомления будут отключены${NC}"
@@ -86,7 +87,7 @@ else
         ALERT_EMAIL=""
     fi
 
-    read -p "Введите From email [${SMTP_USERNAME}]: " FROM_EMAIL
+    read -r -p "Введите From email [${SMTP_USERNAME}]: " FROM_EMAIL
     FROM_EMAIL=${FROM_EMAIL:-$SMTP_USERNAME}
 fi
 

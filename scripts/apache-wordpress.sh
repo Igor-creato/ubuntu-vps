@@ -32,6 +32,34 @@ print_header() {
     echo -e "${BLUE}[STEP]${NC} $1"
 }
 
+effective_ssh_ports() {
+    command -v sshd >/dev/null 2>&1 || {
+        print_error "sshd не найден: безопасно определить текущий SSH-порт невозможно"
+        return 1
+    }
+    sshd -T | awk 'tolower($1) == "port" && $2 ~ /^[0-9]+$/ { print $2 }' | sort -nu
+}
+
+configure_web_firewall() {
+    local -a ssh_ports=()
+    local port
+    mapfile -t ssh_ports < <(effective_ssh_ports)
+    ((${#ssh_ports[@]} > 0)) || {
+        print_error "Не найден ни один эффективный SSH-порт; UFW не изменён"
+        return 1
+    }
+    for port in "${ssh_ports[@]}"; do
+        ufw allow "$port/tcp"
+    done
+    ufw allow http
+    ufw allow https
+    if LC_ALL=C ufw status | grep -q '^Status: active$'; then
+        ufw reload
+    else
+        print_warning "UFW был выключен и оставлен выключенным; правила подготовлены без активации"
+    fi
+}
+
 # Функция генерации безопасных паролей
 generate_password() {
     local length=${1:-16}
@@ -171,12 +199,7 @@ print_status "? Apache успешно установлен и запущен"
 
 # Настройка файрвола UFW
 print_header "Шаг 5: Настройка файрвола UFW"
-ufw --force enable
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow ssh
-ufw allow http
-ufw allow https
+configure_web_firewall
 print_status "? Файрвол настроен"
 
 # Установка MariaDB

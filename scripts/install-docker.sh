@@ -8,18 +8,21 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # === КОНСТАНТЫ И КОНФИГУРАЦИЯ ===
-readonly SCRIPT_NAME="$(basename "$0")"
+SCRIPT_NAME="$(basename "$0")"
+readonly SCRIPT_NAME
 readonly LOG_FILE="/var/log/${SCRIPT_NAME%.*}.log"
 readonly DOCKER_GPG_KEY="/etc/apt/keyrings/docker.gpg"
 readonly DOCKER_REPO_FILE="/etc/apt/sources.list.d/docker.list"
 readonly MIN_UBUNTU_VERSION="20.04"
+TARGET_USER="${TARGET_USER:-${USERNAME:-}}"
 
 # === ФУНКЦИИ ЛОГИРОВАНИЯ ===
 log() {
     local level="$1"
     shift
     local message="$*"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE"
 }
 
@@ -72,18 +75,10 @@ check_system() {
 
 # === ФУНКЦИЯ: найти целевого пользователя ===
 get_target_user() {
-    local target_user=""
-    
-    # Если скрипт запущен не от root, используем текущего пользователя
-    if [[ $EUID -ne 0 ]] && [[ -n "${SUDO_USER:-}" ]]; then
-        target_user="$SUDO_USER"
-    else
-        # Ищем последнего созданного обычного пользователя
-        target_user=$(getent passwd \
-            | awk -F: '$3>=1000 && $3<65534 && $1!="nobody" && $7 ~ /\/(bash|zsh|fish)$/ {users[$3]=$1} END {for(uid in users) print uid, users[uid]}' \
-            | sort -n \
-            | tail -n 1 \
-            | cut -d' ' -f2)
+    local target_user="${TARGET_USER:-}"
+
+    if [[ -z "$target_user" && $EUID -ne 0 ]]; then
+        target_user="${SUDO_USER:-$(id -un)}"
     fi
     
     # Валидация пользователя
@@ -92,6 +87,26 @@ get_target_user() {
     else
         return 1
     fi
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user)
+                [[ $# -ge 2 ]] || { log_error "--user требует значение"; return 2; }
+                TARGET_USER="$2"
+                shift 2
+                ;;
+            --help|-h)
+                printf 'Использование: %s [--user USERNAME]\n' "$SCRIPT_NAME"
+                return 2
+                ;;
+            *)
+                log_error "Неизвестный параметр: $1"
+                return 2
+                ;;
+        esac
+    done
 }
 
 # === ФУНКЦИЯ: очистка при ошибке ===
@@ -211,7 +226,8 @@ install_docker_compose_standalone() {
     log_info "Скачиваю Docker Compose версии $compose_version..."
     
     # Скачиваем бинарный файл
-    local compose_url="https://github.com/docker/compose/releases/download/v${compose_version}/docker-compose-$(uname -s)-$(uname -m)"
+    local compose_url
+    compose_url="https://github.com/docker/compose/releases/download/v${compose_version}/docker-compose-$(uname -s)-$(uname -m)"
     if sudo curl -L --connect-timeout 30 --max-time 300 "$compose_url" -o /usr/local/bin/docker-compose; then
         sudo chmod +x /usr/local/bin/docker-compose
         
@@ -336,6 +352,11 @@ EOF
 
 # === ОСНОВНАЯ ФУНКЦИЯ ===
 main() {
+    local parse_status=0
+    parse_args "$@" || parse_status=$?
+    [[ "$parse_status" -ne 2 ]] || return 0
+    [[ "$parse_status" -eq 0 ]] || return "$parse_status"
+
     # Настройка обработки сигналов
     trap cleanup_on_error ERR INT TERM
     
@@ -397,4 +418,6 @@ EOF
 }
 
 # Запуск основной функции
-main "$@"
+if [[ "${VPS_DOCKER_INSTALL_LIBRARY:-0}" != "1" ]]; then
+    main "$@"
+fi

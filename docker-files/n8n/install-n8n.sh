@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 set -e
@@ -27,7 +26,7 @@ if [[ -z "${USE_VPN}" ]]; then
   esac
 fi
 
-COMPOSE_ARGS="-f docker-compose.yml"
+COMPOSE_ARGS=(-f docker-compose.yml)
 # === /VPN ===
 
 
@@ -178,7 +177,7 @@ networks:
     external: true
 YAML
 
-  COMPOSE_ARGS="-f docker-compose.yml -f docker-compose.vpn.yml"
+  COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.vpn.yml)
   echo "✅ docker-compose.vpn.yml создан"
 fi
 # Установка с vpn
@@ -192,7 +191,7 @@ N8N_BASIC_AUTH_PASSWORD=$(openssl rand -base64 16 | tr -d '/+=' | cut -c1-16)
 
 # Запрос доменного имени
 echo "🌐 Запрос конфигурационной информации"
-read -p "Введите доменное имя для n8n (например: example.com) запустится на поддомене n8n.example.com: " N8N_HOST
+read -r -p "Введите доменное имя для n8n (например: example.com) запустится на поддомене n8n.example.com: " N8N_HOST
 
 # Создаем .env файл со ВСЕМИ переменными (включая секреты)
 echo "📝 Создаем .env файл"
@@ -266,7 +265,7 @@ echo "================================================"
 echo ""
 
 # Ожидаем подтверждения
-read -p "Нажмите Enter чтобы продолжить..."
+read -r -p "Нажмите Enter чтобы продолжить..."
 
 # >>> NEW: создать внешнюю сеть VPN, если её нет
 if ! docker network inspect "${VPN_NET}" >/dev/null 2>&1; then
@@ -278,7 +277,7 @@ fi
 
 # Запускаем docker-compose
 echo "🐳 Запускаем n8n с помощью Docker Compose"
-docker compose ${COMPOSE_ARGS} up -d
+docker compose "${COMPOSE_ARGS[@]}" up -d
 
 
 echo "⏳ Ожидаем запуск контейнеров (10 секунд)..."

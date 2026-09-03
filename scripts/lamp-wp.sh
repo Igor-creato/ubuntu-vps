@@ -24,6 +24,33 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+effective_ssh_ports() {
+    command -v sshd >/dev/null 2>&1 || {
+        print_error "sshd was not found; refusing to alter UFW blindly"
+        return 1
+    }
+    sshd -T | awk 'tolower($1) == "port" && $2 ~ /^[0-9]+$/ { print $2 }' | sort -nu
+}
+
+configure_web_firewall() {
+    local -a ssh_ports=()
+    local port
+    mapfile -t ssh_ports < <(effective_ssh_ports)
+    ((${#ssh_ports[@]} > 0)) || {
+        print_error "No effective SSH port found; UFW was not changed"
+        return 1
+    }
+    for port in "${ssh_ports[@]}"; do
+        ufw allow "$port/tcp"
+    done
+    ufw allow 'Apache Full'
+    if LC_ALL=C ufw status | grep -q '^Status: active$'; then
+        ufw reload
+    else
+        print_warning "UFW was inactive and remains inactive; rules were staged only"
+    fi
+}
+
 # Check if script is run as root
 if [ "$EUID" -ne 0 ]; then
     print_error "Please run this script as root (use sudo)"
@@ -168,11 +195,7 @@ apt install -y certbot python3-certbot-apache
 
 # Configure firewall
 print_status "Configuring firewall..."
-ufw --force enable
-ufw allow ssh
-ufw allow 'Apache Full'
-ufw allow 80
-ufw allow 443
+configure_web_firewall
 
 # Restart Apache
 systemctl restart apache2
