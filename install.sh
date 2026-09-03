@@ -15,7 +15,7 @@ readonly LOG_FILE
 # URL скриптов
 readonly SSH_SCRIPT_URL="${BASE_URL}/ssh-setup.sh"
 readonly DOCKER_SCRIPT_URL="${BASE_URL}/install-docker.sh"
-readonly SSH_SCRIPT_SHA256="56131ce947f0eef469b78ac89cc2a43777fc88e48357a79da486923239b45325"
+readonly SSH_SCRIPT_SHA256="5db06c8d21f847187aa395c477c5b067379ee2823d61068707e2f1e4c2d9820e"
 readonly DOCKER_SCRIPT_SHA256="08245f762e816df9537f5a400ef41c1cbecc1c912647c22f080eeb0b9482b21f"
 
 # Цвета для вывода
