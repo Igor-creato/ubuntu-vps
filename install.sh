@@ -6,7 +6,7 @@ IFS=$'\n\t'
 # Константы и конфигурация
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
-readonly SCRIPT_VERSION="3.0.0"
+readonly SCRIPT_VERSION="3.0.1"
 BASE_URL="${UBUNTU_VPS_BASE_URL:-https://raw.githubusercontent.com/Igor-creato/ubuntu-vps/main/scripts}"
 readonly BASE_URL
 LOG_FILE="/tmp/ubuntu-setup-$(date +%Y%m%d-%H%M%S).log"
@@ -14,12 +14,8 @@ readonly LOG_FILE
 
 # URL скриптов
 readonly SSH_SCRIPT_URL="${BASE_URL}/ssh-setup.sh"
-readonly CHAT_ID_URL="${BASE_URL}/chat-id.sh"
-readonly AUTO_UPDATE_URL="${BASE_URL}/auto_update_ubuntu.sh"
 readonly DOCKER_SCRIPT_URL="${BASE_URL}/install-docker.sh"
 readonly SSH_SCRIPT_SHA256="8532b0c24810bb81db5a1ecb1f2c116ed680574caa19d80077d19541fbcdd901"
-readonly CHAT_ID_SHA256="3dd92314e3472eb60a5805e80e66bf09644d532adc2518e9443107032dc68eb2"
-readonly AUTO_UPDATE_SHA256="d78539f007cb20363e87378b20f20de3ee483500005e4e89219b07214f9488ea"
 readonly DOCKER_SCRIPT_SHA256="08245f762e816df9537f5a400ef41c1cbecc1c912647c22f080eeb0b9482b21f"
 
 # Цвета для вывода
@@ -59,14 +55,14 @@ final_result_status() {
 
 build_execution_plan() {
   local install_ssh="$1"
-  local get_chat_id="$2"
-  local setup_auto_update="$3"
-  local install_docker="$4"
+  local install_docker="$2"
+  local install_ufw="$3"
+  local install_fail2ban="$4"
   [[ "$install_ssh" == true ]] && printf '%s\n' ssh
   printf '%s\n' system-update
   [[ "$install_ssh" == true ]] && printf '%s\n' ssh-verify
-  [[ "$get_chat_id" == true ]] && printf '%s\n' chat
-  [[ "$setup_auto_update" == true ]] && printf '%s\n' auto-update
+  [[ "$install_ufw" == true ]] && printf '%s\n' ufw
+  [[ "$install_fail2ban" == true ]] && printf '%s\n' fail2ban
   [[ "$install_docker" == true ]] && printf '%s\n' docker
   return 0
 }
@@ -84,10 +80,26 @@ prompt_ssh_inputs() {
   fi
 }
 
+confirm_step() {
+  local step_number="$1"
+  local total_steps="$2"
+  local description="$3"
+  [[ "${VPS_AUTO_CONFIRM:-false}" == true ]] && return 0
+  local reply
+  echo
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  Шаг [$step_number/$total_steps]: $description"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  read -r -p "Выполнить этот шаг? (Y/n): " -n 1 reply
+  echo
+  [[ ! "$reply" =~ ^[Nn]$ ]]
+}
+
 confirm_execution() {
   [[ "${VPS_AUTO_CONFIRM:-false}" == true ]] && return 0
   local reply
-  read -r -p "Продолжить? (Y/n): " -n 1 reply
+  echo
+  read -r -p "Начать выполнение? (Y/n): " -n 1 reply
   echo
   [[ ! "$reply" =~ ^[Nn]$ ]]
 }
@@ -249,9 +261,9 @@ $SCRIPT_NAME v$SCRIPT_VERSION
 
 ОПЦИИ:
   --ssh                 Установка и настройка SSH
-  --chat                Получение Telegram Chat ID
-  --update              Настройка автоматических обновлений
   --docker              Установка Docker
+  --ufw                 Установка и настройка UFW
+  --fail2ban            Установка и настройка Fail2ban
   --username NAME       Имя пользователя для ssh-setup.sh  (альтернатива: переменная окружения USERNAME)
   --ssh-port PORT       Порт SSH для ssh-setup.sh          (альтернатива: переменная окружения SSH_PORT)
   --public-key-file PATH Публичный ключ/authorized_keys для ssh-setup.sh
@@ -282,16 +294,16 @@ system_update() {
 # Парсинг опций
 parse_args() {
   local -n _install_ssh=$1
-  local -n _get_chat_id=$2
-  local -n _setup_auto_update=$3
-  local -n _install_docker=$4
+  local -n _install_docker=$2
+  local -n _install_ufw=$3
+  local -n _install_fail2ban=$4
   shift 4
 
   if [[ $# -eq 0 ]]; then
     _install_ssh=true
-    _get_chat_id=true
-    _setup_auto_update=true
     _install_docker=true
+    _install_ufw=true
+    _install_fail2ban=true
     log "INFO" "Опции не заданы — будут выполнены все шаги."
     return 0
   fi
@@ -299,9 +311,9 @@ parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --ssh)        _install_ssh=true ;;
-      --chat)       _get_chat_id=true ;;
-      --update)     _setup_auto_update=true ;;
       --docker)     _install_docker=true ;;
+      --ufw)        _install_ufw=true ;;
+      --fail2ban)   _install_fail2ban=true ;;
       --username)
         [[ $# -ge 2 ]] || { log "ERROR" "Для --username требуется значение"; return 2; }
         USERNAME="$2"; shift
@@ -323,6 +335,48 @@ parse_args() {
     esac
     shift
   done
+}
+
+# Установка UFW
+install_ufw() {
+  log "INFO" "Установка и настройка UFW..."
+  export DEBIAN_FRONTEND=noninteractive
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    apt-get install -y ufw
+    log "SUCCESS" "UFW установлен"
+  else
+    log "INFO" "UFW уже установлен"
+  fi
+
+  # Базовая настройка UFW
+  log "INFO" "Настройка правил UFW..."
+
+  # Разрешаем HTTP и HTTPS для веб-сервисов
+  ufw allow 80/tcp comment 'HTTP' || true
+  ufw allow 443/tcp comment 'HTTPS' || true
+
+  log "SUCCESS" "UFW настроен (порты 80, 443 открыты)"
+  log "INFO" "SSH порт будет настроен автоматически в ssh-setup.sh"
+}
+
+# Установка Fail2ban
+install_fail2ban() {
+  log "INFO" "Установка и настройка Fail2ban..."
+  export DEBIAN_FRONTEND=noninteractive
+
+  if ! command -v fail2ban-client >/dev/null 2>&1; then
+    apt-get install -y fail2ban
+    log "SUCCESS" "Fail2ban установлен"
+  else
+    log "INFO" "Fail2ban уже установлен"
+  fi
+
+  systemctl enable fail2ban
+  systemctl start fail2ban || true
+
+  log "SUCCESS" "Fail2ban настроен и запущен"
+  log "INFO" "SSH jail будет настроен автоматически в ssh-setup.sh"
 }
 
 validate_inputs() {
@@ -359,12 +413,14 @@ main() {
   log "INFO" "Логи: $LOG_FILE"
 
   local install_ssh=false
-  local get_chat_id=false
-  local setup_auto_update=false
   local install_docker=false
+  local install_ufw=false
+  local install_fail2ban=false
   local planned_step
+  local current_step=0
+  local total_steps=0
 
-  parse_args install_ssh get_chat_id setup_auto_update install_docker "$@"
+  parse_args install_ssh install_docker install_ufw install_fail2ban "$@"
   if [[ "$install_ssh" == true ]]; then
     prompt_ssh_inputs
   fi
@@ -373,10 +429,17 @@ main() {
   check_dependencies
   check_system_compatibility
 
-  log "INFO" "План выполнения:"
+  # Подсчитываем общее количество шагов
+  [[ "$install_ssh" == true ]] && ((total_steps += 2))  # ssh + ssh-verify
+  ((total_steps += 1))  # system-update
+  [[ "$install_ufw" == true ]] && ((total_steps += 1))
+  [[ "$install_fail2ban" == true ]] && ((total_steps += 1))
+  [[ "$install_docker" == true ]] && ((total_steps += 1))
+
+  log "INFO" "План выполнения (шагов: $total_steps):"
   while IFS= read -r planned_step; do
     log "INFO" "  - $planned_step"
-  done < <(build_execution_plan "$install_ssh" "$get_chat_id" "$setup_auto_update" "$install_docker")
+  done < <(build_execution_plan "$install_ssh" "$install_docker" "$install_ufw" "$install_fail2ban")
 
   echo
   if ! confirm_execution; then
@@ -384,39 +447,75 @@ main() {
     exit 0
   fi
 
+  # Шаг 1: SSH настройка (если требуется)
   if [[ "$install_ssh" == true ]]; then
-    local -a args=()
-    mapfile -t args < <(build_ssh_child_args)
-    safe_execute_remote_script "$SSH_SCRIPT_URL" "Транзакционная настройка SSH" "$SSH_SCRIPT_SHA256" "${args[@]}" || {
-      log "ERROR" "SSH migration не завершена; остальные мутации отменены"
-      exit 1
-    }
+    ((current_step += 1))
+    if confirm_step "$current_step" "$total_steps" "Настройка SSH (транзакционная миграция)"; then
+      local -a args=()
+      mapfile -t args < <(build_ssh_child_args)
+      safe_execute_remote_script "$SSH_SCRIPT_URL" "Транзакционная настройка SSH" "$SSH_SCRIPT_SHA256" "${args[@]}" || {
+        log "ERROR" "SSH migration не завершена; остальные мутации отменены"
+        exit 1
+      }
+    else
+      log "INFO" "Пропуск: настройка SSH"
+    fi
   fi
 
-  system_update || { log "ERROR" "Сбой обновления системы"; exit 1; }
+  # Шаг 2: Обновление системы (всегда)
+  ((current_step += 1))
+  if confirm_step "$current_step" "$total_steps" "Обновление системы (apt-get update && upgrade)"; then
+    system_update || { log "ERROR" "Сбой обновления системы"; exit 1; }
+  else
+    log "WARN" "Пропуск обновления системы (не рекомендуется)"
+  fi
 
+  # Шаг 3: Проверка SSH после обновления (если SSH был настроен)
   if [[ "$install_ssh" == true ]]; then
-    local -a verify_args=(--verify-only)
-    [[ -z "${USERNAME:-}" ]] || verify_args+=(--user "$USERNAME")
-    [[ -z "${SSH_PORT:-}" ]] || verify_args+=(--port "$SSH_PORT")
-    VPS_AUTO_CONFIRM=true safe_execute_remote_script "$SSH_SCRIPT_URL" "Проверка SSH после обновления" "$SSH_SCRIPT_SHA256" "${verify_args[@]}" || {
-      log "ERROR" "SSH verification после обновления не прошла; не закрывайте текущую сессию"
-      exit 1
-    }
+    ((current_step += 1))
+    if confirm_step "$current_step" "$total_steps" "Проверка SSH после обновления системы"; then
+      local -a verify_args=(--verify-only)
+      [[ -z "${USERNAME:-}" ]] || verify_args+=(--user "$USERNAME")
+      [[ -z "${SSH_PORT:-}" ]] || verify_args+=(--port "$SSH_PORT")
+      VPS_AUTO_CONFIRM=true safe_execute_remote_script "$SSH_SCRIPT_URL" "Проверка SSH после обновления" "$SSH_SCRIPT_SHA256" "${verify_args[@]}" || {
+        log "ERROR" "SSH verification после обновления не прошла; не закрывайте текущую сессию"
+        exit 1
+      }
+    else
+      log "WARN" "Пропуск проверки SSH"
+    fi
   fi
 
-  if [[ "$get_chat_id" == true ]]; then
-    safe_execute_remote_script "$CHAT_ID_URL" "Получение Telegram Chat ID" "$CHAT_ID_SHA256" || increment_errors
+  # Шаг 4: Установка UFW
+  if [[ "$install_ufw" == true ]]; then
+    ((current_step += 1))
+    if confirm_step "$current_step" "$total_steps" "Установка и настройка UFW (порты 80, 443)"; then
+      install_ufw || increment_errors
+    else
+      log "INFO" "Пропуск: установка UFW"
+    fi
   fi
 
-  if [[ "$setup_auto_update" == true ]]; then
-    safe_execute_remote_script "$AUTO_UPDATE_URL" "Настройка автоматических обновлений" "$AUTO_UPDATE_SHA256" || increment_errors
+  # Шаг 5: Установка Fail2ban
+  if [[ "$install_fail2ban" == true ]]; then
+    ((current_step += 1))
+    if confirm_step "$current_step" "$total_steps" "Установка и настройка Fail2ban"; then
+      install_fail2ban || increment_errors
+    else
+      log "INFO" "Пропуск: установка Fail2ban"
+    fi
   fi
 
+  # Шаг 6: Установка Docker
   if [[ "$install_docker" == true ]]; then
-    local -a docker_args=()
-    [[ -z "${USERNAME:-}" ]] || docker_args+=(--user "$USERNAME")
-    safe_execute_remote_script "$DOCKER_SCRIPT_URL" "Установка Docker" "$DOCKER_SCRIPT_SHA256" "${docker_args[@]}" || increment_errors
+    ((current_step += 1))
+    if confirm_step "$current_step" "$total_steps" "Установка Docker и Docker Compose"; then
+      local -a docker_args=()
+      [[ -z "${USERNAME:-}" ]] || docker_args+=(--user "$USERNAME")
+      safe_execute_remote_script "$DOCKER_SCRIPT_URL" "Установка Docker" "$DOCKER_SCRIPT_SHA256" "${docker_args[@]}" || increment_errors
+    else
+      log "INFO" "Пропуск: установка Docker"
+    fi
   fi
 
   echo

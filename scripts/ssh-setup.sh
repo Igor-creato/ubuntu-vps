@@ -6,7 +6,7 @@ umask 077
 
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
-readonly SCRIPT_VERSION="3.0.0"
+readonly SCRIPT_VERSION="3.0.1"
 
 LOG_FILE="${LOG_FILE:-/var/log/ubuntu-vps-ssh-setup.log}"
 STATE_ROOT="${STATE_ROOT:-/var/lib/ubuntu-vps/ssh-transactions}"
@@ -36,6 +36,7 @@ OLD_PORT=""
 TRANSACTION_ACTIVE=false
 ROLLBACK_RUNNING=false
 TEMP_FILES=()
+ADOPTED_PORT_RECORDS=()
 
 log() {
     local level="$1"
@@ -185,8 +186,139 @@ find_unmanaged_port_directives() {
     fi
     for file in "${files[@]}"; do
         [[ -f "$file" && "$file" != "$managed_config" ]] || continue
-        awk -v source="$file" '/^[[:space:]]*#/ || /^[[:space:]]*$/ {next} tolower($1)=="match" {in_match=1; next} !in_match && tolower($1)=="port" {line=$0; sub(/^[[:space:]]*/,"",line); print source ":" line}' "$file"
+        awk -v source="$file" '
+            {
+                line=$0
+                sub(/^[[:space:]]*/, "", line)
+                if (line == "" || line ~ /^#/) next
+                keyword=line
+                sub(/[=[:space:]].*$/, "", keyword)
+                if (tolower(keyword) == "match") { in_match=1; next }
+                if (!in_match && tolower(keyword) == "port") {
+                    value=line
+                    sub(/^[^=[:space:]]+/, "", value)
+                    sub(/^[[:space:]]*/, "", value)
+                    sub(/^=[[:space:]]*/, "", value)
+                    port=value
+                    sub(/[[:space:]].*$/, "", port)
+                    print source "\t" NR "\t" port "\t" line
+                }
+            }
+        ' "$file"
     done
+}
+
+unmanaged_port_records_are_adoptable() {
+    local expected_port="$1" records="${2:-}" source line_number port directive
+    [[ -n "$records" ]] || return 0
+    while IFS=$'\t' read -r source line_number port directive; do
+        [[ -n "$source" && "$line_number" =~ ^[1-9][0-9]*$ && "$port" =~ ^[0-9]+$ && -n "$directive" ]] || return 1
+        [[ "$port" == "$expected_port" ]] || return 1
+    done <<< "$records"
+}
+
+format_unmanaged_port_records() {
+    local records="${1:-}" source line_number port directive
+    while IFS=$'\t' read -r source line_number port directive; do
+        [[ -n "$source" ]] || continue
+        printf '%s:%s:%s\n' "$source" "$line_number" "$directive"
+    done <<< "$records"
+}
+
+backup_adopted_port_configs() {
+    local backup_dir manifest source line_number port directive index=0
+    local -A seen=()
+    [[ -n "$TRANSACTION_DIR" ]] || return 1
+    backup_dir="$TRANSACTION_DIR/adopted-port-configs"
+    manifest="$backup_dir/manifest"
+    mkdir -p "$backup_dir"
+    : > "$manifest"
+    ((${#ADOPTED_PORT_RECORDS[@]} > 0)) || return 0
+    printf '%s\n' "${ADOPTED_PORT_RECORDS[@]}" > "$backup_dir/records.before"
+    for directive in "${ADOPTED_PORT_RECORDS[@]}"; do
+        IFS=$'\t' read -r source line_number port _ <<< "$directive"
+        [[ -f "$source" && -n "$line_number" && -n "$port" ]] || return 1
+        [[ "$source" != *$'\t'* && "$source" != *$'\n'* ]] || return 1
+        [[ -z "${seen[$source]:-}" ]] || continue
+        seen["$source"]=1
+        cp -a -- "$source" "$backup_dir/$index.before"
+        printf '%s\t%s\n' "$index" "$source" >> "$manifest"
+        index=$((index + 1))
+    done
+    chmod 0600 "$manifest" "$backup_dir/records.before"
+}
+
+neutralize_adopted_port_configs() {
+    local expected_port="$1" backup_dir manifest index source backup temporary current_records expected_records
+    ((${#ADOPTED_PORT_RECORDS[@]} > 0)) || return 0
+    backup_dir="$TRANSACTION_DIR/adopted-port-configs"
+    manifest="$backup_dir/manifest"
+    [[ -f "$manifest" && -f "$backup_dir/records.before" ]] || return 1
+    expected_records="$(printf '%s\n' "${ADOPTED_PORT_RECORDS[@]}")"
+    current_records="$(find_unmanaged_port_directives "$SSHD_CONFIG" "$SSH_CONFIG_DIR" "$MANAGED_CONFIG")"
+    [[ "$current_records" == "$expected_records" ]] || {
+        log ERROR "Port directives изменились после preflight; финальная активация отменена"
+        return 1
+    }
+    while IFS=$'\t' read -r index source; do
+        [[ -n "$index" && -n "$source" ]] || continue
+        backup="$backup_dir/$index.before"
+        [[ -f "$backup" && -f "$source" ]] || return 1
+        cmp -s -- "$backup" "$source" || {
+            log ERROR "SSH config изменён после backup: $source"
+            return 1
+        }
+    done < "$manifest"
+    while IFS=$'\t' read -r index source; do
+        [[ -n "$index" && -n "$source" ]] || continue
+        temporary="$(mktemp "$(dirname "$source")/.ubuntu-vps-port.XXXXXX")"
+        TEMP_FILES+=("$temporary")
+        awk -v expected="$expected_port" '
+            {
+                line=$0
+                sub(/^[[:space:]]*/, "", line)
+                if (line == "" || line ~ /^#/) { print; next }
+                keyword=line
+                sub(/[=[:space:]].*$/, "", keyword)
+                if (tolower(keyword) == "match") { in_match=1; print; next }
+                if (!in_match && tolower(keyword) == "port") {
+                    value=line
+                    sub(/^[^=[:space:]]+/, "", value)
+                    sub(/^[[:space:]]*/, "", value)
+                    sub(/^=[[:space:]]*/, "", value)
+                    port=value
+                    sub(/[[:space:]].*$/, "", port)
+                    if (port == expected) {
+                        print "# ubuntu-vps-disabled-port: " line
+                        changed++
+                        next
+                    }
+                }
+                print
+            }
+            END { if (changed == 0) exit 1 }
+        ' "$source" > "$temporary"
+        chmod --reference="$source" "$temporary"
+        mv -f -- "$temporary" "$source"
+    done < "$manifest"
+}
+
+restore_adopted_port_configs() {
+    local backup_dir manifest index source backup status=0
+    ((${#ADOPTED_PORT_RECORDS[@]} > 0)) || return 0
+    backup_dir="$TRANSACTION_DIR/adopted-port-configs"
+    manifest="$backup_dir/manifest"
+    [[ -f "$manifest" ]] || return 1
+    while IFS=$'\t' read -r index source; do
+        [[ -n "$index" && -n "$source" ]] || continue
+        backup="$backup_dir/$index.before"
+        if [[ -e "$backup" ]]; then
+            cp -a -- "$backup" "$source" || status=1
+        else
+            status=1
+        fi
+    done < "$manifest"
+    return "$status"
 }
 
 backup_managed_config() {
@@ -407,12 +539,20 @@ sshd_effective() {
 }
 
 preflight_ssh() {
-    local conflicts effective
+    local port_records effective formatted_records
     "$SSHD_BIN" -t -f "$SSHD_CONFIG"; OLD_PORT="$(current_connection_port)"
     validate_port "$OLD_PORT" || error_exit "Не удалось определить текущий SSH-порт"
     port_is_listening "$OLD_PORT" || error_exit "Текущий SSH-порт $OLD_PORT не слушается"
-    conflicts="$(find_unmanaged_port_directives "$SSHD_CONFIG" "$SSH_CONFIG_DIR" "$MANAGED_CONFIG")"
-    [[ -z "$conflicts" ]] || error_exit "Обнаружены unmanaged Port directives; автоматическая миграция остановлена:\n$conflicts"
+    port_records="$(find_unmanaged_port_directives "$SSHD_CONFIG" "$SSH_CONFIG_DIR" "$MANAGED_CONFIG")"
+    if ! unmanaged_port_records_are_adoptable "$OLD_PORT" "$port_records"; then
+        formatted_records="$(format_unmanaged_port_records "$port_records")"
+        error_exit "Обнаружены неоднозначные unmanaged Port directives; автоматическая миграция остановлена:"$'\n'"$formatted_records"
+    fi
+    ADOPTED_PORT_RECORDS=()
+    if [[ -n "$port_records" ]]; then
+        mapfile -t ADOPTED_PORT_RECORDS <<< "$port_records"
+        log INFO "Найдены явные директивы текущего Port $OLD_PORT; они останутся активны до проверки нового SSH-входа"
+    fi
     effective="$(sshd_effective "$USERNAME" "$OLD_PORT")"; authorized_keys_path_supported "$effective" || error_exit "Effective AuthorizedKeysFile не включает .ssh/authorized_keys"
     if [[ "$SSHD_PORT" != "$OLD_PORT" ]] && port_is_listening "$SSHD_PORT"; then error_exit "Порт $SSHD_PORT уже занят"; fi
 }
@@ -434,7 +574,7 @@ prepare_user_key() {
 begin_transaction() {
     TRANSACTION_ID="$(date -u '+%Y%m%dT%H%M%SZ')-$$-$RANDOM"; TRANSACTION_DIR="$STATE_ROOT/$TRANSACTION_ID"
     mkdir -p "$TRANSACTION_DIR" "$BACKUP_ROOT"; chmod 0711 "$STATE_ROOT" "$TRANSACTION_DIR"
-    cp -a /etc/ssh "$BACKUP_ROOT/ssh-$TRANSACTION_ID"; backup_managed_config; backup_fail2ban_config
+    cp -a /etc/ssh "$BACKUP_ROOT/ssh-$TRANSACTION_ID"; backup_managed_config; backup_adopted_port_configs; backup_fail2ban_config
     printf 'old_port=%s\nnew_port=%s\nuser=%s\n' "$OLD_PORT" "$SSHD_PORT" "$USERNAME" > "$TRANSACTION_DIR/metadata"; chmod 0600 "$TRANSACTION_DIR/metadata"
     TRANSACTION_ACTIVE=true
 }
@@ -458,12 +598,21 @@ assert_final_effective() {
 maybe_failpoint() { [[ "${VPS_FAILPOINT:-}" != "$1" ]] || die "Injected failpoint: $1"; }
 
 rollback_transaction() {
-    local status=0 ssh_recovery_ready=false
+    local status=0 ssh_recovery_ready=false ssh_config_restored=true
     [[ "$TRANSACTION_ACTIVE" == true ]] || return 0; [[ "$ROLLBACK_RUNNING" == false ]] || return 1
     ROLLBACK_RUNNING=true; set +e; log WARN "Откат SSH-транзакции $TRANSACTION_ID"
+    if ! restore_adopted_port_configs; then
+        status=1
+        ssh_config_restored=false
+        log ERROR "Не удалось восстановить исходные Port directives; runtime и UFW оставлены без изменений"
+    fi
     if ! restore_managed_config; then
         status=1
+        ssh_config_restored=false
         log ERROR "Не удалось восстановить managed SSH config; runtime и UFW оставлены без изменений"
+    fi
+    if [[ "$ssh_config_restored" != true ]]; then
+        :
     elif ! "$SSHD_BIN" -t -f "$SSHD_CONFIG"; then
         status=1
         log ERROR "Восстановленная SSH-конфигурация невалидна; действующий runtime и recovery UFW rules не изменены"
@@ -552,7 +701,7 @@ main() {
     apply_ssh_runtime; port_is_listening "$OLD_PORT"; port_is_listening "$SSHD_PORT"; maybe_failpoint after_stage_activation
     if [[ "$ENABLE_UFW" == true ]]; then stage_ufw "$OLD_PORT" "$SSHD_PORT"; fi
     maybe_failpoint after_ufw; create_and_wait_for_verification; maybe_failpoint after_verification
-    final_config="$(render_final_config "$SSHD_PORT")"; write_managed_config "$final_config"; "$SSHD_BIN" -t -f "$SSHD_CONFIG"; assert_final_effective; maybe_failpoint before_final_activation
+    neutralize_adopted_port_configs "$OLD_PORT"; final_config="$(render_final_config "$SSHD_PORT")"; write_managed_config "$final_config"; "$SSHD_BIN" -t -f "$SSHD_CONFIG"; assert_final_effective; maybe_failpoint before_final_activation
     apply_ssh_runtime; port_is_listening "$SSHD_PORT"
     if [[ "$OLD_PORT" != "$SSHD_PORT" ]] && port_is_listening "$OLD_PORT"; then die "Старый SSH listener $OLD_PORT всё ещё активен"; fi
     configure_fail2ban

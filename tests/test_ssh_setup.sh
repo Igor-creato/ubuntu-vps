@@ -168,7 +168,7 @@ test_ssh_connection_parsing_with_strict_ifs() {
 }
 
 test_unmanaged_port_conflict() {
-    local temp output
+    local temp output status
     temp="$(mktemp -d)"
     trap 'rm -rf "$temp"' RETURN
     mkdir -p "$temp/sshd_config.d"
@@ -178,7 +178,65 @@ test_unmanaged_port_conflict() {
     assert_eq '' "$output" "cloud-init authentication setting is not a port conflict"
     printf '%s\n' 'Port 2200' > "$temp/sshd_config.d/40-custom-port.conf"
     output="$(find_unmanaged_port_directives "$temp/sshd_config" "$temp/sshd_config.d" "$temp/sshd_config.d/00-vps-hardening.conf")"
-    assert_contains "$output" '40-custom-port.conf:Port 2200' "active unmanaged Port is reported"
+    assert_contains "$output" "40-custom-port.conf"$'\t'"1"$'\t'"2200"$'\t'"Port 2200" "active unmanaged Port is reported"
+
+    printf '%s\n' 'Port 22' > "$temp/sshd_config.d/40-custom-port.conf"
+    output="$(find_unmanaged_port_directives "$temp/sshd_config" "$temp/sshd_config.d" "$temp/sshd_config.d/00-vps-hardening.conf")"
+    status=0
+    unmanaged_port_records_are_adoptable 22 "$output" || status=$?
+    assert_status 0 "$status" "an explicit directive for the currently listening port can be adopted safely"
+
+    printf '%s\n' 'Port=22' > "$temp/sshd_config.d/40-custom-port.conf"
+    output="$(find_unmanaged_port_directives "$temp/sshd_config" "$temp/sshd_config.d" "$temp/sshd_config.d/00-vps-hardening.conf")"
+    assert_contains "$output" "40-custom-port.conf"$'\t'"1"$'\t'"22"$'\t'"Port=22" "OpenSSH keyword=value syntax is detected"
+
+    printf '%s\n' 'Port 2200' > "$temp/sshd_config.d/40-custom-port.conf"
+    output="$(find_unmanaged_port_directives "$temp/sshd_config" "$temp/sshd_config.d" "$temp/sshd_config.d/00-vps-hardening.conf")"
+    status=0
+    unmanaged_port_records_are_adoptable 22 "$output" || status=$?
+    assert_status 1 "$status" "a directive for another port remains an ambiguous conflict"
+}
+
+test_adopted_port_directive_transaction() {
+    local temp records output status original_main original_dropin
+    temp="$(mktemp -d)"
+    trap 'rm -rf "$temp"' RETURN
+    mkdir -p "$temp/sshd_config.d" "$temp/transaction"
+    SSHD_CONFIG="$temp/sshd_config"
+    SSH_CONFIG_DIR="$temp/sshd_config.d"
+    MANAGED_CONFIG="$temp/sshd_config.d/00-vps-hardening.conf"
+    TRANSACTION_DIR="$temp/transaction"
+    printf '%s\n' \
+        'Include sshd_config.d/*.conf' \
+        '# operator comment' \
+        'Port 22' \
+        'PasswordAuthentication yes' > "$SSHD_CONFIG"
+    printf '%s\n' \
+        '  Port 22 # provider default' \
+        'PubkeyAuthentication yes' > "$SSH_CONFIG_DIR/40-provider.conf"
+    original_main="$(sha256sum "$SSHD_CONFIG" | awk '{print $1}')"
+    original_dropin="$(sha256sum "$SSH_CONFIG_DIR/40-provider.conf" | awk '{print $1}')"
+
+    records="$(find_unmanaged_port_directives "$SSHD_CONFIG" "$SSH_CONFIG_DIR" "$MANAGED_CONFIG")"
+    mapfile -t ADOPTED_PORT_RECORDS <<< "$records"
+    status=0
+    backup_adopted_port_configs || status=$?
+    assert_status 0 "$status" "adopted Port files are backed up before mutation"
+
+    status=0
+    neutralize_adopted_port_configs 22 || status=$?
+    assert_status 0 "$status" "only snapshotted current-port directives are neutralized"
+    output="$(find_unmanaged_port_directives "$SSHD_CONFIG" "$SSH_CONFIG_DIR" "$MANAGED_CONFIG")"
+    assert_eq '' "$output" "neutralized current Port directives are no longer active"
+    assert_contains "$(cat "$SSHD_CONFIG")" '# ubuntu-vps-disabled-port: Port 22' "main config retains an annotated copy of the adopted directive"
+    assert_contains "$(cat "$SSH_CONFIG_DIR/40-provider.conf")" '# ubuntu-vps-disabled-port: Port 22 # provider default' "drop-in retains the original directive text"
+
+    status=0
+    restore_adopted_port_configs || status=$?
+    assert_status 0 "$status" "rollback restores all adopted Port files"
+    assert_eq "$original_main" "$(sha256sum "$SSHD_CONFIG" | awk '{print $1}')" "rollback restores the main config byte-for-byte"
+    assert_eq "$original_dropin" "$(sha256sum "$SSH_CONFIG_DIR/40-provider.conf" | awk '{print $1}')" "rollback restores the drop-in byte-for-byte"
+    ADOPTED_PORT_RECORDS=()
 }
 
 test_managed_config_rollback() {
@@ -476,6 +534,7 @@ test_runtime_application_modes
 test_listener_detection
 test_ssh_connection_parsing_with_strict_ifs
 test_unmanaged_port_conflict
+test_adopted_port_directive_transaction
 test_managed_config_rollback
 test_invalid_rollback_config_does_not_restart_or_close_firewall
 test_effective_config_assertions
