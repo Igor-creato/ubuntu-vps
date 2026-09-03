@@ -486,6 +486,9 @@ install_dependencies() {
     command -v flock >/dev/null
     command -v "$VISUDO_BIN" >/dev/null
     command -v "$SS_BIN" >/dev/null
+    if [[ "$ENABLE_UFW" == true ]]; then
+        command -v "$UFW_BIN" >/dev/null
+    fi
     command -v "$FAIL2BAN_BIN" >/dev/null
 }
 
