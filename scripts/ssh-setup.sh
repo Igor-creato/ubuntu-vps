@@ -507,7 +507,16 @@ prompt_missing_inputs() {
     if [[ -z "$SSHD_PORT" ]]; then read -r -p "Новый SSH-порт (1-65535): " SSHD_PORT; validate_port "$SSHD_PORT" || error_exit "Некорректный SSH-порт"; fi
 }
 
-ensure_user() { getent passwd "$USERNAME" >/dev/null || adduser --disabled-password --gecos '' "$USERNAME"; usermod -aG sudo "$USERNAME"; }
+ensure_user() {
+    if ! getent passwd "$USERNAME" >/dev/null; then
+        adduser --disabled-password --gecos '' "$USERNAME"
+    fi
+    if getent group sudo >/dev/null; then
+        usermod -aG sudo "$USERNAME"
+    else
+        log WARN "Группа sudo не найдена; пропуск добавления $USERNAME в sudo"
+    fi
+}
 
 ensure_non_root_target() {
     local record
@@ -697,8 +706,18 @@ main() {
     parse_args "$@" || parse_status=$?; [[ "$parse_status" -ne 2 ]] || return 0; [[ "$parse_status" -eq 0 ]] || return "$parse_status"
     require_root; mkdir -p "$(dirname "$LOG_FILE")"; touch "$LOG_FILE"; chmod 0600 "$LOG_FILE"; check_os; acquire_lock
     if [[ "$VERIFY_ONLY" == true ]]; then check_verify_dependencies; verify_only; return 0; fi
+    log INFO "Установка зависимостей..."
     install_dependencies
-    prompt_missing_inputs; ensure_non_root_target; ensure_user; resolve_user_home_and_group; configure_sudo; preflight_ssh; prepare_user_key; begin_transaction
+    log INFO "Валидация входных данных..."
+    prompt_missing_inputs; ensure_non_root_target; ensure_user; resolve_user_home_and_group
+    log INFO "Настройка sudo..."
+    configure_sudo
+    log INFO "Предварительная проверка SSH..."
+    preflight_ssh
+    log INFO "Подготовка ключей..."
+    prepare_user_key
+    log INFO "Начало транзакции..."
+    begin_transaction
     trap 'on_error $? $LINENO' ERR
     stage_config="$(render_stage_config "$OLD_PORT" "$SSHD_PORT" "$USERNAME")"; write_managed_config "$stage_config"; "$SSHD_BIN" -t -f "$SSHD_CONFIG"; assert_stage_effective; maybe_failpoint after_stage_validation
     apply_ssh_runtime; port_is_listening "$OLD_PORT"; port_is_listening "$SSHD_PORT"; maybe_failpoint after_stage_activation
