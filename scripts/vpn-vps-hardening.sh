@@ -6,10 +6,11 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION='2.0.0'
+VERSION='2.1.0'
 SELF='/usr/local/sbin/vpn-vps-hardening'
 STATE='/var/lib/vpn-vps-hardening'
-SSH_CONFIG='/etc/ssh/sshd_config.d/00-vpn-vps-hardening.conf'
+SSHD_CONFIG_ROOT='/etc/ssh'
+SSH_CONFIG="${SSHD_CONFIG_ROOT}/sshd_config.d/00-vpn-vps-hardening.conf"
 JAIL_CONFIG='/etc/fail2ban/jail.d/98-vpn-vps-sshd.local'
 SSHD='/usr/sbin/sshd'
 LOCK='/run/lock/vpn-vps-hardening.lock'
@@ -52,12 +53,62 @@ listening() {
 }
 ports_effective() { "$SSHD" -T | awk '$1 == "port" {print $2}'; }
 valid_stage_ports() {
-  local actual
-  actual="$(ports_effective)"
-  [[ "$actual" == "$(printf '22\n%s' "$PORT")" ]] || {
-    warn "Unexpected sshd Port directives: $(printf %q "$actual") (wanted 22 and $PORT)."
+  local actual distinct expected
+  actual="$(ports_effective)" || return 1
+  # OpenSSH accumulates multiple Port directives across Include files. A pre-existing
+  # Port 22 must not cause a false failure during staging; compare actual *sets*.
+  distinct="$(printf '%s\n' "$actual" | LC_ALL=C sort -nu)"
+  expected="$(printf '22\n%s\n' "$PORT" | LC_ALL=C sort -nu)"
+  [[ "$distinct" == "$expected" ]] || {
+    warn "Unexpected sshd Port directives: $(printf %q "$actual") (wanted only 22 and $PORT)."
     return 1
   }
+}
+
+# SSH Port is an additive directive: the main config or a provider drop-in may
+# contain its own active `Port 22`. An additional drop-in with Port $PORT does
+# NOT override that old port. To close 22 safely in the final configuration,
+# back up and comment only literal active `Port 22` directives outside our file.
+# Other ports, directives, and unknown Include paths are never modified; the
+# final `sshd -T` and runtime checks fail closed if a conflict remains.
+neutralize_external_port22() {
+  local file backup tmp changed=0
+  local -a candidates=("$SSHD_CONFIG_ROOT/sshd_config")
+  local candidate
+  for candidate in "$SSHD_CONFIG_ROOT"/sshd_config.d/*.conf; do
+    [[ -f "$candidate" ]] && candidates+=("$candidate")
+  done
+  for file in "${candidates[@]}"; do
+    [[ -f "$file" && "$file" != "$SSH_CONFIG" ]] || continue
+    # Do not follow configuration symlinks and accidentally replace provider files.
+    [[ ! -L "$file" ]] || die "Refusing to edit symlinked SSH config: $file"
+    if ! grep -Eiq '^[[:space:]]*port[[:space:]]+22([[:space:]]*(#.*)?)?$' "$file"; then
+      continue
+    fi
+    backup="$STATE/ssh-port-backups/${file#"$SSHD_CONFIG_ROOT"/}"
+    mkdir -p -m 0700 "$(dirname "$backup")"
+    if [[ -e "$backup" ]]; then
+      # A user edit since a previous run is not safe to overwrite automatically.
+      cmp -s -- "$file" "$backup" || die "SSH config $file changed after backup; inspect manually."
+    else
+      cp -a -- "$file" "$backup"
+    fi
+    tmp="$(mktemp "$(dirname "$file")/.vpn-port.XXXXXXXX")"
+    # Preserve the original owner, mode, and file metadata in the replacement.
+    cp -a -- "$file" "$tmp"
+    awk '{
+      lc=tolower($0)
+      if (lc ~ /^[[:space:]]*port[[:space:]]+22([[:space:]]*(#.*)?)?$/) {
+        print "# vpn-vps-hardening: disabled redundant " $0
+      } else print
+    }' "$file" > "$tmp"
+    mv -f -- "$tmp" "$file"
+    msg "Backed up and disabled an existing Port 22 directive in $file."
+    changed=1
+  done
+  if (( changed )); then
+    "$SSHD" -t || die 'SSH config invalid after disabling redundant ports; recovery will preserve port 22.'
+  fi
 }
 valid_final_config() {
   local output actual
@@ -85,7 +136,7 @@ apply_ssh() {
 }
 write_ssh_stage() {
   local tmp
-  tmp="$(mktemp /etc/ssh/sshd_config.d/.vpn-hardening.XXXXXX)"
+  tmp="$(mktemp "$(dirname "$SSH_CONFIG")/.vpn-hardening.XXXXXX")"
   cat > "$tmp" <<EOF_STAGE
 # Managed by vpn-vps-hardening: temporary recovery access.
 Port 22
@@ -96,7 +147,7 @@ EOF_STAGE
 }
 write_ssh_final() {
   local tmp
-  tmp="$(mktemp /etc/ssh/sshd_config.d/.vpn-hardening.XXXXXX)"
+  tmp="$(mktemp "$(dirname "$SSH_CONFIG")/.vpn-hardening.XXXXXX")"
   cat > "$tmp" <<EOF_FINAL
 # Managed by vpn-vps-hardening: key-only admin access.
 Port $PORT
@@ -423,6 +474,7 @@ prepare() {
   set_admin_key
   install -m 0700 -o root -g root "$(readlink -f "$0")" "$SELF"
   msg 'STEP 3: Opening the second SSH port while keeping port 22 as recovery.'
+  neutralize_external_port22
   write_ssh_stage
   "$SSHD" -t
   valid_stage_ports
@@ -562,6 +614,7 @@ vpn-vps-hardening.sh v$VERSION (Ubuntu 24.04 LTS)
 Only on a dedicated fresh Ubuntu VPS (also supports legacy 'setup-failed' state).
 Upgrades installed packages first; does not reboot automatically or install Docker / 3x-ui.
 Obtain VPS provider console access and a snapshot before starting.
+Original conflicting SSH configs are preserved under /var/lib/vpn-vps-hardening/ssh-port-backups/.
 EOF_USAGE
 }
 main() {
