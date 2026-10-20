@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION='2.4.0'
+VERSION='2.4.1'
 SELF='/usr/local/sbin/vpn-vps-hardening'
 STATE='/var/lib/vpn-vps-hardening'
 SSHD_CONFIG_ROOT='/etc/ssh'
@@ -247,17 +247,43 @@ check_ufw_policy() {
   ufw status verbose | grep -F 'Default: deny (incoming)' >/dev/null || return 1
 }
 check_allowed_rules() {
-  local allow_22="$1"
-  # No additional inbound ALLOW rules, including IPv6 or UDP, are permitted on this dedicated host.
-  ufw status | awk -v ssh="${PORT}/tcp" -v keep22="$allow_22" '
-    $0 ~ /[[:space:]]ALLOW[[:space:]]+IN[[:space:]]/ {
-      p=$1
-      if (p==ssh || p=="80/tcp" || p=="443/tcp") next
-      if (keep22=="yes" && p=="22/tcp") next
-      bad=1; print "Unexpected UFW ALLOW: " $0 > "/dev/stderr"
+  local allow_22="$1" rules
+  # First check actual saved user rules. Unlike the formatted status view,
+  # `ufw show added` unambiguously exposes the original allow/deny commands.
+  # Never accept broad or source-limited ALLOW rules as a substitute for the intended rules.
+  if ! check_saved_ufw_rules "$allow_22"; then
+    warn 'Saved UFW rules differ from the expected TCP allowlist.'
+    return 1
+  fi
+  rules="$(ufw status)" || { warn 'Failed to read active UFW rules.'; return 1; }
+  # UFW may print either `ALLOW Anywhere` or `ALLOW IN Anywhere` depending
+  # on the status format/version. An IPv6 line also adds `(v6)` after its port.
+  # Reject unexpected allowances in both forms, including IPv6 and UDP.
+  awk -v ssh="${PORT}/tcp" -v keep22="$allow_22" '
+    {
+      for (i=2; i<=NF; i++) {
+        if ($i == "ALLOW") {
+          p=$1
+          if (p==ssh || p=="80/tcp" || p=="443/tcp") break
+          if (keep22=="yes" && p=="22/tcp") break
+          bad=1
+          print "Unexpected active UFW ALLOW: " $0 > "/dev/stderr"
+          break
+        }
+      }
     }
     END {exit bad}
-  '
+  ' <<< "$rules"
+}
+
+ufw_status_has_public_allow() {
+  local port="$1" status="$2"
+  # Enforce an inbound allow from Anywhere (rather than accepting a restricted
+  # source address). The parser accepts both documented UFW formats.
+  awk -v want="$port" '
+    $1==want && $2=="ALLOW" && (($3=="IN" && $4=="Anywhere") || $3=="Anywhere") {present=1}
+    END {exit(!present)}
+  ' <<< "$status"
 }
 ensure_ufw_stage() {
   local is_active=false
@@ -641,17 +667,37 @@ require_admin_session() {
   [[ "$dstport" == "$PORT" ]] || die "Connect through new SSH port $PORT first."
 }
 verify_final() {
-  valid_final_config || return 1
-  listening "$PORT" || { warn "SSH port $PORT is not listening."; return 1; }
-  if listening 22; then warn 'Old SSH port 22 is still listening.'; return 1; fi
-  check_ufw_policy || return 1
-  check_allowed_rules no || return 1
-  local rules
-  rules="$(ufw status)"
-  grep -Eq "^${PORT}/tcp[[:space:]]+ALLOW[[:space:]]+IN" <<< "$rules" || return 1
-  grep -Eq '^80/tcp[[:space:]]+ALLOW[[:space:]]+IN' <<< "$rules" || return 1
-  grep -Eq '^443/tcp[[:space:]]+ALLOW[[:space:]]+IN' <<< "$rules" || return 1
-  fail2ban-client status sshd >/dev/null 2>&1 || return 1
+  if ! valid_final_config; then
+    warn 'Final check failed: SSH effective configuration does not match key-only policy.'
+    return 1
+  fi
+  listening "$PORT" || { warn "Final check failed: SSH port $PORT is not listening."; return 1; }
+  if listening 22; then warn 'Final check failed: old SSH port 22 is still listening.'; return 1; fi
+  if ! check_ufw_policy; then
+    warn 'Final check failed: UFW inactive or incoming default policy is not deny.'
+    ufw status verbose >&2 || true
+    return 1
+  fi
+  if ! check_allowed_rules no; then
+    warn 'Final check failed: UFW contains unexpected allow rules.'
+    ufw status >&2 || true
+    return 1
+  fi
+  local rules wanted
+  rules="$(ufw status)" || { warn 'Final check failed: cannot read UFW status.'; return 1; }
+  for wanted in "${PORT}/tcp" 80/tcp 443/tcp; do
+    if ! ufw_status_has_public_allow "$wanted" "$rules"; then
+      warn "Final check failed: UFW must allow incoming TCP $wanted from Anywhere."
+      printf '%s\n' "$rules" >&2
+      return 1
+    fi
+  done
+  if ! fail2ban-client status sshd >/dev/null 2>&1; then
+    warn 'Final check failed: Fail2ban sshd jail not ready.'
+    fail2ban-client status >&2 || true
+    return 1
+  fi
+  return 0
 }
 rollback() {
   require_ubuntu
