@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION='2.1.0'
+VERSION='2.2.0'
 SELF='/usr/local/sbin/vpn-vps-hardening'
 STATE='/var/lib/vpn-vps-hardening'
 SSHD_CONFIG_ROOT='/etc/ssh'
@@ -196,6 +196,49 @@ set_admin_key() {
   [[ -s "$keyfile" ]] && ssh-keygen -lf "$keyfile" >/dev/null 2>&1 || die 'No usable public key for administrator.'
 }
 ufw_active() { ufw status | grep -Fx 'Status: active' >/dev/null; }
+# UFW stores user rules even when the firewall is inactive. When resuming a failed
+# hardening run, validate those SAVED rules rather than treating their mere
+# existence as an error. Never silently enable unexpected existing rules.
+check_saved_ufw_rules() {
+  local keep22="$1"
+  ufw show added | awk -v ssh="${PORT}/tcp" -v keep22="$keep22" '
+    $1 == "ufw" {
+      p=$3
+      allowed=(($2=="allow") && (p==ssh || p=="80/tcp" || p=="443/tcp" || (keep22=="yes" && p=="22/tcp")))
+      simple=(NF==3 || (NF>=5 && $4=="comment"))
+      if (!allowed || !simple) {
+        bad=1
+        print "Unexpected saved UFW rule: " $0 > "/dev/stderr"
+      }
+    }
+    END {exit bad}
+  '
+}
+
+# A previous interrupted installation can leave a stale high SSH-port UFW rule.
+# On this explicitly dedicated VPS, the operator may opt to reset INACTIVE UFW
+# rules after they have been displayed and a backup has been made. Never reset
+# an active firewall or touch UFW without deliberate approval.
+review_inactive_ufw_rules() {
+  if check_saved_ufw_rules yes; then return 0; fi
+  printf '\nExisting INACTIVE UFW user rules differ from the requested 22/%s/80/443 allowlist:\n' "$PORT"
+  ufw show added || return 1
+  printf '\nThis VPS is reserved for 3x-ui. Reset ONLY INACTIVE UFW user rules?\n'
+  printf 'The script will back up /etc/ufw and /etc/default/ufw, then recreate\n'
+  printf 'rules for TCP 22 (temporary recovery), %s, 80 and 443.\n' "$PORT"
+  printf 'Type RESET-UFW to approve, or press Enter to abort: '
+  local answer backup
+  IFS= read -r answer
+  [[ "$answer" == 'RESET-UFW' ]] || die 'UFW rules were not changed. Review the saved rules before retrying.'
+  [[ -d "$STATE" ]] || die 'No saved installation state; refusing UFW reset.'
+  backup="$STATE/ufw-before-reset-$(date -u +%Y%m%dT%H%M%SZ)-$$.tar.gz"
+  tar -czf "$backup" -C /etc ufw default/ufw || die 'Could not back up UFW configuration; refusing reset.'
+  chmod 0600 "$backup"
+  msg "Original UFW files backed up: $backup"
+  ufw_active && die 'UFW unexpectedly became active; aborting reset.'
+  ufw --force reset || die 'UFW reset failed; review the console output.'
+  check_saved_ufw_rules yes || die 'UFW rules still unexpected after reset.'
+}
 check_ufw_policy() {
   ufw_active || return 1
   ufw status verbose | grep -F 'Default: deny (incoming)' >/dev/null || return 1
@@ -220,8 +263,9 @@ ensure_ufw_stage() {
     check_ufw_policy || die 'Active UFW has unexpected default policy; do not overwrite automatically.'
     check_allowed_rules yes || die 'Existing UFW allows additional ports; review before retrying.'
   else
-    # On a fresh host, no existing UFW user rules should be present.
-    if ufw show added | grep '^ufw ' >/dev/null; then die 'UFW is inactive but has existing rules; refusing to reset them.'; fi
+    # A resumable interrupted run may have already saved the correct rules.
+    # Only allow the expected TCP ports to be enabled; no broad firewall reset.
+    check_saved_ufw_rules yes || die 'Inactive UFW still has unexpected saved rules. Stop and inspect with: sudo ufw show added'
   fi
   ufw allow 22/tcp
   ufw allow "$PORT/tcp"
@@ -376,9 +420,14 @@ prepare() {
     fresh=false
     case "$MODE" in
       prepared)
-        msg "Setup is already prepared (port $PORT). Verify the new SSH connection and finalize."
-        print_access_instructions
-        return 0 ;;
+        if ufw_active && check_ufw_policy && check_allowed_rules yes && \
+           valid_stage_ports && listening 22 && listening "$PORT" && \
+           fail2ban-client status sshd >/dev/null 2>&1; then
+          msg "Setup is already prepared (port $PORT). Verify the new SSH connection and finalize."
+          print_access_instructions
+          return 0
+        fi
+        msg 'Saved mode is prepared but runtime is incomplete; repairing via prepare.' ;;
       complete) die 'Server is already configured. Use the status command.' ;;
       pending-confirm) die 'Finalization pending. Confirm through a fresh SSH connection or wait for automatic rollback.' ;;
       setup-failed|rolled-back|preparing) msg "RESUMING interrupted setup: admin=$ADMIN port=$PORT mode=$MODE" ;;
@@ -445,9 +494,9 @@ prepare() {
     if ufw_active; then
       check_ufw_policy && check_allowed_rules yes || die 'Unexpected current UFW rules/policy; review manually.'
     else
-      if ufw show added | grep '^ufw ' >/dev/null; then
-        die 'UFW inactive with existing rules. Cannot safely resume automatically.'
-      fi
+      # The previous script can leave a correct saved allowlist when UFW is
+      # inactive. Reuse it, or offer an explicit backed-up reset of stale rules.
+      review_inactive_ufw_rules
     fi
   fi
   ensure_ipv6_ufw
