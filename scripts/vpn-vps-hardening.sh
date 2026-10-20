@@ -1,132 +1,128 @@
-verify_final() {
-  valid_final_config || return 1
-  listening "$PORT" || { warn "SSH port $PORT is not listening."; return 1; }
-  if listening 22; then warn 'Old SSH port 22 is still listening.'; return 1; fi
-  check_ufw_policy || return 1
-  check_allowed_rules no || return 1
-  local rules
-  rules="$(ufw status)"
-  grep -Eq "^${PORT}/tcp[[:space:]]+ALLOW[[:space:]]+IN" <<< "$rules" || return 1
-  grep -Eq '^80/tcp[[:space:]]+ALLOW[[:space:]]+IN' <<< "$rules" || return 1
-  grep -Eq '^443/tcp[[:space:]]+ALLOW[[:space:]]+IN' <<< "$rules" || return 1
-  fail2ban-client status sshd >/dev/null 2>&1 || return 1
-}
-rollback() {
-  require_ubuntu
-  lock_setup
-  read_saved
-  if [[ "$MODE" != pending-confirm ]]; then msg "Rollback not needed (mode=$MODE)."; return 0; fi
-  msg 'Rollback: restoring original SSH port 22 and both-port staging.'
-  if restore_recovery_ssh; then
-    # SSH recovery takes priority over Fail2ban recovery.
-    write_jail "22,$PORT" || warn 'Fail2ban jail could not be updated during rollback.'
-    set_mode rolled-back
-    msg 'Old port 22 recovered. Re-run prepare or finalize when ready.'
-  else
-    return 1
-  fi
-}
-finalize_error() {
-  local rc="$1" line="$2"
-  trap - ERR EXIT INT TERM HUP
-  warn "Finalization failed at line $line (exit $rc). Attempting to restore SSH port 22."
-  # Avoid deadlock: rollback() locks setup, but finalize() already holds the lock.
-  if restore_recovery_ssh; then
-    write_jail "22,$PORT" || true
-    set_mode rolled-back
-  fi
-  exit "$rc"
-}
-finalize() {
-  require_ubuntu
-  lock_setup
-  read_saved
-  [[ "$MODE" == prepared || "$MODE" == rolled-back ]] || die "Expected prepared/rolled-back, got $MODE."
-  require_admin_session
-  valid_stage_ports || die 'Staging SSH ports are not as expected.'
-  listening 22 && listening "$PORT" || die 'Both staging listeners are not active.'
-  check_ufw_policy && check_allowed_rules yes || die 'UFW rules changed unexpectedly.'
-  msg "Scheduling a ${ROLLBACK_SECONDS}s automatic recovery if a THIRD SSH session is not confirmed."
-  local unit
-  unit="vpn-vps-hardening-rollback-$(date +%s)-$$"
-  # A unique transient timer works even when a previous rollback timer has fired.
-  systemd-run --quiet --unit="$unit" --on-active="${ROLLBACK_SECONDS}s" "$SELF" rollback || die 'Failed to arm automatic rollback: nothing was changed.'
-  printf '%s.timer\n' "$unit" > "$STATE/rollback_timer"
-  printf '%s\n' "${SSH_CONNECTION:-}" > "$STATE/finalize_session"
-  set_mode pending-confirm
-  trap 'finalize_error "$?" "$LINENO"' ERR EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM HUP
-  write_ssh_final
-  valid_final_config
-  apply_ssh
-  listening "$PORT" && ! listening 22 || { warn 'Unexpected SSH listeners after finalization.'; false; }
-  ufw --force delete allow 22/tcp
-  write_jail "$PORT"
-  verify_final || { warn 'Final verification failed.'; false; }
-  trap - ERR EXIT INT TERM HUP
-  printf '\nFINALIZATION ACTIVE (NOT YET CONFIRMED).\n'
-  printf 'Open a THIRD, fresh SSH connection by private key on port %s as %s.\n' "$PORT" "$ADMIN"
-  printf 'In that THIRD SSH session run:\n'
-  printf '  sudo --preserve-env=SSH_CONNECTION %s confirm\n' "$SELF"
-  printf 'DO NOT reboot or close your current sessions until confirmed.\n'
-  printf 'If unconfirmed, SSH port 22 will reopen automatically in %s minutes.\n' "$((ROLLBACK_SECONDS/60))"
-}
-confirm() {
-  require_ubuntu
-  lock_setup
-  read_saved
-  [[ "$MODE" == pending-confirm ]] || die "Nothing to confirm (mode=$MODE)."
-  require_admin_session
-  [[ -s "$STATE/finalize_session" ]] || die 'Missing finalization session marker.'
-  [[ "${SSH_CONNECTION:-}" != "$(cat "$STATE/finalize_session")" ]] || die 'This is the finalization SSH session. Open a THIRD, new SSH connection for confirmation.'
-  verify_final || die 'SSH/UFW/Fail2ban verification failed; rollback is still scheduled.'
-  # Commit state FIRST: even if systemd stop fails, a late timer will see 'complete' and do nothing.
-  set_mode complete
-  if [[ -s "$STATE/rollback_timer" ]]; then
-    systemctl stop "$(cat "$STATE/rollback_timer")" || warn 'Timer stop failed, but commit state prevents rollback.'
-  fi
-  msg "SUCCESS. SSH: $ADMIN via key at TCP/$PORT. UFW: only TCP/80, TCP/443 and TCP/$PORT."
-  msg 'Fail2ban is active. Docker, 3x-ui and the panel port were not installed/opened.'
-  show_reboot_notice
-}
-status() {
-  require_ubuntu
-  read_saved
-  printf 'Version: %s\nState: %s\nAdmin: %s\nSSH port: %s\n' "$VERSION" "$MODE" "$ADMIN" "$PORT"
-  "$SSHD" -T | awk '$1=="port" || $1=="passwordauthentication" || $1=="permitrootlogin"'
-  systemctl is-active ssh.socket || true
-  ss -lntp | grep -E 'ssh|:22 |:80 |:443 ' || true
-  ufw status verbose
-  fail2ban-client status sshd || true
-  if [[ -s "$STATE/rollback_timer" ]]; then
-    systemctl is-active "$(cat "$STATE/rollback_timer")" || true
-  fi
-}
-usage() {
-  cat <<EOF_USAGE
-vpn-vps-hardening.sh v$VERSION (Ubuntu 24.04 LTS)
-  sudo bash vpn-vps-hardening.sh prepare        # New server OR resume interrupted initial install
-  sudo --preserve-env=SSH_CONNECTION $SELF finalize  # Via NEW SSH session
-  sudo --preserve-env=SSH_CONNECTION $SELF confirm   # Via THIRD SSH session
-  sudo $SELF status
+#!/usr/bin/env bash
+# Ubuntu 24.04 LTS: SSH keys + UFW + Fail2ban for a clean VPS running 3x-ui later.
+# No Docker, VPN panel or web server is installed. First-run and interrupted-run support.
+# IMPORTANT: Obtain VPS provider console access and create a snapshot before use.
+set -Eeuo pipefail
+umask 077
+export LC_ALL=C
 
-Only on a dedicated fresh Ubuntu VPS (also supports legacy 'setup-failed' state).
-Upgrades installed packages first; does not reboot automatically or install Docker / 3x-ui.
-Obtain VPS provider console access and a snapshot before starting.
-EOF_USAGE
+VERSION='2.0.0'
+SELF='/usr/local/sbin/vpn-vps-hardening'
+STATE='/var/lib/vpn-vps-hardening'
+SSH_CONFIG='/etc/ssh/sshd_config.d/00-vpn-vps-hardening.conf'
+JAIL_CONFIG='/etc/fail2ban/jail.d/98-vpn-vps-sshd.local'
+SSHD='/usr/sbin/sshd'
+LOCK='/run/lock/vpn-vps-hardening.lock'
+ROLLBACK_SECONDS=600
+PORT=''
+ADMIN=''
+MODE=''
+PUBLIC_KEY=''
+
+msg() { printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"; }
+warn() { printf '\nWARNING: %s\n' "$*" >&2; }
+die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+require_root() { (( EUID == 0 )) || die 'Run with sudo/root.'; }
+require_tty() { [[ -t 0 ]] || die 'An interactive terminal is required. Never pipe this script to bash.'; }
+require_ubuntu() {
+  [[ -r /etc/os-release ]] || die '/etc/os-release not found.'
+  # shellcheck source=/dev/null
+  source /etc/os-release
+  [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] || die 'Only Ubuntu 24.04 LTS is supported.'
 }
-main() {
-  require_root
-  case "${1:-}" in
-    prepare|resume) prepare ;;
-    finalize) finalize ;;
-    confirm) confirm ;;
-    rollback) rollback ;;
-    status) status ;;
-    --version|-v) printf '%s\n' "$VERSION" ;;
-    --help|-h|'') usage ;;
-    *) usage; die "Unknown operation: $1" ;;
-  esac
+lock_setup() {
+  mkdir -p "$(dirname "$LOCK")"
+  exec 9>"$LOCK"
+  flock -w 40 9 || die 'Another hardening operation is in progress.'
 }
-main "$@"
+valid_user() { [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,30}$ && "$1" != root ]]; }
+valid_port() { [[ "$1" =~ ^2[0-9]{4}$ ]] && (( 10#$1 >= 20000 && 10#$1 <= 29999 )) && [[ "$1" != 21086 ]]; }
+set_mode() { printf '%s\n' "$1" > "$STATE/mode"; MODE="$1"; }
+read_saved() {
+  [[ -s "$STATE/port" && -s "$STATE/admin" && -s "$STATE/mode" ]] || die 'Incomplete saved state; inspect /var/lib/vpn-vps-hardening before retrying.'
+  PORT="$(cat "$STATE/port")"
+  ADMIN="$(cat "$STATE/admin")"
+  MODE="$(cat "$STATE/mode")"
+  valid_port "$PORT" || die 'Invalid saved SSH port.'
+  valid_user "$ADMIN" || die 'Invalid saved administrator.'
+  [[ "$MODE" =~ ^(preparing|prepared|setup-failed|pending-confirm|rolled-back|complete)$ ]] || die "Unknown saved mode: $MODE"
+}
+listening() {
+  ss -H -lnt | awk -v wanted="$1" '{p=$4; sub(/^.*:/,"",p); if (p==wanted) ok=1} END {exit !ok}'
+}
+ports_effective() { "$SSHD" -T | awk '$1 == "port" {print $2}'; }
+valid_stage_ports() {
+  local actual
+  actual="$(ports_effective)"
+  [[ "$actual" == "$(printf '22\n%s' "$PORT")" ]] || {
+    warn "Unexpected sshd Port directives: $(printf %q "$actual") (wanted 22 and $PORT)."
+    return 1
+  }
+}
+valid_final_config() {
+  local output actual
+  "$SSHD" -t || return 1
+  actual="$(ports_effective)"
+  [[ "$actual" == "$PORT" ]] || { warn "Unexpected sshd ports: $actual"; return 1; }
+  output="$("$SSHD" -T -C "user=$ADMIN,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=$PORT")" || return 1
+  local expected
+  for expected in 'passwordauthentication no' 'kbdinteractiveauthentication no' \
+                  'pubkeyauthentication yes' 'authenticationmethods publickey' \
+                  'permitrootlogin no' "allowusers $ADMIN"; do
+    grep -Fqx -- "$expected" <<< "$output" || { warn "sshd effective setting missing: $expected"; return 1; }
+  done
+}
+apply_ssh() {
+  "$SSHD" -t
+  # Ubuntu 24.04 normally generates ssh.socket ListenStream from sshd_config at daemon-reload.
+  systemctl daemon-reload
+  if systemctl is-active --quiet ssh.socket; then
+    systemctl restart ssh.socket
+    if systemctl is-active --quiet ssh.service; then systemctl restart ssh.service; fi
+  else
+    systemctl reload-or-restart ssh.service
+  fi
+}
+write_ssh_stage() {
+  local tmp
+  tmp="$(mktemp /etc/ssh/sshd_config.d/.vpn-hardening.XXXXXX)"
+  cat > "$tmp" <<EOF_STAGE
+# Managed by vpn-vps-hardening: temporary recovery access.
+Port 22
+Port $PORT
+EOF_STAGE
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$SSH_CONFIG"
+}
+write_ssh_final() {
+  local tmp
+  tmp="$(mktemp /etc/ssh/sshd_config.d/.vpn-hardening.XXXXXX)"
+  cat > "$tmp" <<EOF_FINAL
+# Managed by vpn-vps-hardening: key-only admin access.
+Port $PORT
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+PermitRootLogin no
+PermitEmptyPasswords no
+AllowUsers $ADMIN
+EOF_FINAL
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$SSH_CONFIG"
+}
+managed_ssh_file_is_ours() {
+  [[ ! -e "$SSH_CONFIG" ]] && return 0
+  # Also recognize the file from the older script (Port 22 / Port <high port> only).
+  grep -Eq '^# Managed by vpn-vps-hardening|^# Managed by vpn-vps-hardening\.' "$SSH_CONFIG" && return 0
+  local contents
+  contents="$(cat "$SSH_CONFIG")"
+  [[ "$contents" == "$(printf 'Port 22\nPort %s' "$PORT")" ]]
+}
+check_pubkey() {
+  local key="$1" file
+  [[ "$key" =~ ^ssh-ed25519[[:space:]][A-Za-z0-9+/=]+([[:space:]].*)?$ ]] || return 1
+  file="$(mktemp)"
+  printf '%s\n' "$key" > "$file"
+  if ! ssh-keygen -lf "$file" >/dev/null 2>&1; then rm -f "$file"; return 1; fi
+  rm -f "$file"
