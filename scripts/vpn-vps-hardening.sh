@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Ubuntu 24.04 LTS: SSH keys + UFW + Fail2ban for a clean VPS running 3x-ui later.
-# No Docker, VPN panel or web server is installed. First-run and interrupted-run support.
+# Optional official 3x-ui setup AFTER SSH hardening is confirmed. No Docker.
 # IMPORTANT: Obtain VPS provider console access and create a snapshot before use.
 set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION='2.2.0'
+VERSION='2.4.0'
 SELF='/usr/local/sbin/vpn-vps-hardening'
 STATE='/var/lib/vpn-vps-hardening'
 SSHD_CONFIG_ROOT='/etc/ssh'
@@ -14,6 +14,9 @@ SSH_CONFIG="${SSHD_CONFIG_ROOT}/sshd_config.d/00-vpn-vps-hardening.conf"
 JAIL_CONFIG='/etc/fail2ban/jail.d/98-vpn-vps-sshd.local'
 SSHD='/usr/sbin/sshd'
 LOCK='/run/lock/vpn-vps-hardening.lock'
+XUI_INSTALLER_URL='https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh'
+XUI_INSTALL_RESULT='/etc/x-ui/install-result.env'
+PANEL_DOMAIN_FILE="${STATE}/3x-ui-domain"
 ROLLBACK_SECONDS=600
 PORT=''
 ADMIN=''
@@ -335,18 +338,103 @@ ssh_server_ip() {
   fi
   [[ "$ip" =~ ^[0-9.]+$ ]] && printf '%s' "$ip" || printf 'SERVER_IP'
 }
+# Human-readable instructions after every phase. There is deliberately NO
+# automatic finalization: the operator must actually open a NEW SSH session.
+print_step_title() {
+  printf '\n%s\n' '=================================================================='
+  printf ' %s\n' "$1"
+  printf '%s\n' '=================================================================='
+}
+print_windows_ssh_command() {
+  local public_ip="$1"
+  printf '  ssh -i "$env:USERPROFILE\\.ssh\\vpn_vps" -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -p %s %s@%s\n' "$PORT" "$ADMIN" "$public_ip"
+}
+print_install_plan() {
+  print_step_title 'ПЛАН НАСТРОЙКИ: 3 ЭТАПА'
+  printf '%s\n' '  1/3 prepare  — обновить Ubuntu и настроить SSH, UFW, Fail2ban.'
+  printf '%s\n' '  2/3 finalize — после входа ПО КЛЮЧУ с Windows на новый SSH-порт'
+  printf '%s\n' '                 отключить порт 22 и парольную SSH-авторизацию.'
+  printf '%s\n' '  3/3 confirm  — из ЕЩЁ ОДНОЙ НОВОЙ SSH-сессии подтвердить вход.'
+  printf '\n%s\n' '  ВАЖНО: не закрывайте исходную SSH-сессию до шага 3/3.'
+  printf '%s\n' '  Каждый этап выводит отдельные команды для следующего шага.'
+  printf '%s\n' '  После confirm появится вопрос об установке 3x-ui с доменом и TLS.'
+}
 print_access_instructions() {
   local server_ip
   server_ip="$(ssh_server_ip)"
-  printf '\nPREPARED: SSH port 22 remains available for recovery.\n'
-  printf 'Admin: %s  |  New SSH port: %s  |  Server IP: %s\n' "$ADMIN" "$PORT" "$server_ip"
-  printf 'If the detected IP is not reachable, use the public IP from your VPS provider.\n'
-  printf 'In provider firewall, allow TCP/%s before testing the connection.\n' "$PORT"
-  printf '\nFrom a SECOND Windows PowerShell window (use the matching private key):\n'
-  printf '  ssh -i "$env:USERPROFILE\\.ssh\\vpn_vps" -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -p %s %s@%s\n' "$PORT" "$ADMIN" "$server_ip"
-  printf '\nAfter a successful login, from that NEW SSH session run:\n'
+  print_step_title 'ЭТАП 1/3 ГОТОВ: НУЖНО ВРУЧНУЮ ПРОВЕРИТЬ НОВЫЙ SSH-ВХОД'
+  printf 'Пользователь: %s | Новый SSH-порт: %s | Публичный IP: %s\n' "$ADMIN" "$PORT" "$server_ip"
+  printf '%s\n' 'UFW и Fail2ban настроены. Порт 22 ПОКА оставлен для восстановления.'
+  printf 'Если у провайдера включён внешний firewall, разрешите TCP/%s.\n' "$PORT"
+  printf '%s\n' 'Если указанный IP недоступен, используйте IP из панели провайдера.'
+  printf '\n%s\n' 'ДЕЙСТВИЕ 1. Откройте ВТОРОЕ окно PowerShell на вашем компьютере Windows.'
+  printf '%s\n' 'Выполните (путь vpn_vps замените на путь к вашему приватному ключу):'
+  print_windows_ssh_command "$server_ip"
+  printf '\n%s\n' 'ДЕЙСТВИЕ 2. Убедитесь, что вход выполнен именно ПО КЛЮЧУ под указанным пользователем.'
+  printf '%s\n' 'В ЭТОЙ НОВОЙ SSH-сессии на сервере выполните:'
   printf '  sudo --preserve-env=SSH_CONNECTION %s finalize\n' "$SELF"
-  printf '\nDo NOT close your original SSH session until the third-session confirmation.\n'
+  printf '\n%s\n' 'НЕ выполняйте confirm до успешного finalize.'
+  printf '%s\n' 'После finalize скрипт сам выведет команды для третьей SSH-сессии.'
+  printf '%s\n' 'НЕ закрывайте первоначальный терминал и НЕ перезагружайте VPS.'
+  printf '\nЧтобы повторно посмотреть подсказку: sudo %s next\n' "$SELF"
+  printf '%s\n\n' '=================================================================='
+}
+print_finalize_instructions() {
+  local server_ip
+  server_ip="$(ssh_server_ip)"
+  print_step_title 'ЭТАП 2/3 ГОТОВ: НУЖНО ПОДТВЕРДИТЬ ВХОД ИЗ ТРЕТЬЕЙ SSH-СЕССИИ'
+  printf 'SSH-порт: %s | Пользователь: %s | IP: %s\n' "$PORT" "$ADMIN" "$server_ip"
+  printf '%s\n' 'Порт 22 закрыт, парольный вход в SSH отключён.'
+  printf '\n%s\n' 'ДЕЙСТВИЕ 1. Откройте ТРЕТЬЕ, совершенно новое окно PowerShell в Windows.'
+  printf '%s\n' 'Подключитесь по ключу ещё раз:'
+  print_windows_ssh_command "$server_ip"
+  printf '\n%s\n' 'ДЕЙСТВИЕ 2. В ТРЕТЬЕЙ SSH-сессии на сервере выполните:'
+  printf '  sudo --preserve-env=SSH_CONNECTION %s confirm\n' "$SELF"
+  printf '\n%s\n' 'ВАЖНО: confirm нельзя выполнять в той же сессии, где запускался finalize.'
+  printf 'Отсчёт автоматического возврата порта 22: %s минут с запуска finalize.\n' "$((ROLLBACK_SECONDS/60))"
+  printf '%s\n' 'НЕ закрывайте прежние сессии и НЕ перезагружайте сервер до SUCCESS.'
+  printf '\nЧтобы повторно посмотреть подсказку: sudo %s next\n' "$SELF"
+  printf '%s\n\n' '=================================================================='
+}
+print_complete_instructions() {
+  print_step_title 'ЭТАП 3/3 ГОТОВ: НАСТРОЙКА БЕЗОПАСНОСТИ ПОДТВЕРЖДЕНА'
+  printf 'SSH: порт %s, только ключ, пользователь %s; root-вход запрещён.\n' "$PORT" "$ADMIN"
+  printf '%s\n' 'UFW: разрешены TCP 80, TCP 443 и выбранный SSH-порт; остальные входящие запрещены.'
+  printf '%s\n' 'Fail2ban: включена защита SSH.'
+  printf '\n%s\n' 'Проверьте итоговое состояние:'
+  printf '  sudo %s status\n' "$SELF"
+  printf '%s\n' 'Проверьте отдельное новое SSH-подключение, прежде чем закрывать старые окна.'
+  printf '%s\n' 'Если Ubuntu требует перезагрузки, делайте её только ПОСЛЕ этой проверки.'
+  if [[ -s "$PANEL_DOMAIN_FILE" ]]; then
+    printf '%s\n' '3x-ui уже установлена. Посмотреть параметры:'
+    printf '  sudo %s panel-info\n' "$SELF"
+  else
+    printf '%s\n' 'Опционально установить 3x-ui позже:'
+    printf '  sudo %s install-3x-ui\n' "$SELF"
+  fi
+  printf '%s\n\n' '=================================================================='
+}
+print_next_steps() {
+  # Caller already loaded PORT/ADMIN/MODE via read_saved.
+  case "$MODE" in
+    prepared) print_access_instructions ;;
+    pending-confirm) print_finalize_instructions ;;
+    complete) print_complete_instructions ;;
+    preparing|setup-failed|rolled-back)
+      print_step_title 'УСТАНОВКА НЕ ЗАВЕРШЕНА: ТРЕБУЕТСЯ ПОВТОРНАЯ ПОДГОТОВКА'
+      printf 'Текущее состояние: %s; пользователь: %s; порт: %s.\n' "$MODE" "$ADMIN" "$PORT"
+      printf '%s\n' 'Сначала проверьте доступ по старому SSH-порту 22 и наличие консоли провайдера.'
+      printf '%s\n' 'В рабочей первоначальной SSH-сессии запустите:'
+      printf '  sudo bash vpn-vps-hardening.sh prepare\n'
+      printf '%s\n' 'Не запускайте finalize или confirm, пока prepare не покажет «ЭТАП 1/3 ГОТОВ».'
+      ;;
+    *) die "Неизвестное состояние: $MODE" ;;
+  esac
+}
+next_steps() {
+  require_ubuntu
+  read_saved
+  print_next_steps
 }
 restore_recovery_ssh() {
   # Called on errors and by a transient systemd rollback timer. Keep original SSH open.
@@ -405,6 +493,7 @@ prepare() {
   require_ubuntu
   require_tty
   lock_setup
+  print_install_plan
   [[ -x "$SSHD" ]] || die 'OpenSSH server must already be installed.'
   "$SSHD" -t
   listening 22 || die 'Port 22 not listening. This script expects a working original SSH connection.'
@@ -423,13 +512,17 @@ prepare() {
         if ufw_active && check_ufw_policy && check_allowed_rules yes && \
            valid_stage_ports && listening 22 && listening "$PORT" && \
            fail2ban-client status sshd >/dev/null 2>&1; then
-          msg "Setup is already prepared (port $PORT). Verify the new SSH connection and finalize."
+          msg "Сервер уже подготовлен (порт $PORT). Обновляю установленный helper этой версией."
+          local current_script
+          current_script="$(readlink -f "$0")"
+          [[ -f "$current_script" ]] || die 'Запускайте из сохранённого файла, а не из curl | bash.'
+          install -m 0700 -o root -g root "$current_script" "$SELF"
           print_access_instructions
           return 0
         fi
         msg 'Saved mode is prepared but runtime is incomplete; repairing via prepare.' ;;
-      complete) die 'Server is already configured. Use the status command.' ;;
-      pending-confirm) die 'Finalization pending. Confirm through a fresh SSH connection or wait for automatic rollback.' ;;
+      complete) print_complete_instructions; die 'Установка уже завершена. Повторный prepare не нужен.' ;;
+      pending-confirm) print_finalize_instructions; die 'Этап 2 уже выполняется: используйте confirm из третьей SSH-сессии.' ;;
       setup-failed|rolled-back|preparing) msg "RESUMING interrupted setup: admin=$ADMIN port=$PORT mode=$MODE" ;;
     esac
     local existing_home existing_keys
@@ -590,7 +683,10 @@ finalize() {
   require_ubuntu
   lock_setup
   read_saved
-  [[ "$MODE" == prepared || "$MODE" == rolled-back ]] || die "Expected prepared/rolled-back, got $MODE."
+  if [[ "$MODE" != prepared && "$MODE" != rolled-back ]]; then
+    print_next_steps
+    die "Сейчас состояние $MODE: finalize доступен только после prepare и проверки входа по ключу."
+  fi
   require_admin_session
   valid_stage_ports || die 'Staging SSH ports are not as expected.'
   listening 22 && listening "$PORT" || die 'Both staging listeners are not active.'
@@ -614,21 +710,25 @@ finalize() {
   write_jail "$PORT"
   verify_final || { warn 'Final verification failed.'; false; }
   trap - ERR EXIT INT TERM HUP
-  printf '\nFINALIZATION ACTIVE (NOT YET CONFIRMED).\n'
-  printf 'Open a THIRD, fresh SSH connection by private key on port %s as %s.\n' "$PORT" "$ADMIN"
-  printf 'In that THIRD SSH session run:\n'
-  printf '  sudo --preserve-env=SSH_CONNECTION %s confirm\n' "$SELF"
-  printf 'DO NOT reboot or close your current sessions until confirmed.\n'
-  printf 'If unconfirmed, SSH port 22 will reopen automatically in %s minutes.\n' "$((ROLLBACK_SECONDS/60))"
+  print_finalize_instructions
 }
 confirm() {
   require_ubuntu
   lock_setup
   read_saved
-  [[ "$MODE" == pending-confirm ]] || die "Nothing to confirm (mode=$MODE)."
+  if [[ "$MODE" != pending-confirm ]]; then
+    print_next_steps
+    if [[ "$MODE" == prepared ]]; then
+      die "Команда confirm запущена слишком рано: сначала выполните finalize в новой SSH-сессии на порту $PORT."
+    fi
+    die "Команда confirm сейчас недоступна (состояние: $MODE)."
+  fi
   require_admin_session
   [[ -s "$STATE/finalize_session" ]] || die 'Missing finalization session marker.'
-  [[ "${SSH_CONNECTION:-}" != "$(cat "$STATE/finalize_session")" ]] || die 'This is the finalization SSH session. Open a THIRD, new SSH connection for confirmation.'
+  if [[ "${SSH_CONNECTION:-}" == "$(cat "$STATE/finalize_session")" ]]; then
+    print_finalize_instructions
+    die 'Команда confirm должна выполняться из ТРЕТЬЕЙ, новой SSH-сессии.'
+  fi
   verify_final || die 'SSH/UFW/Fail2ban verification failed; rollback is still scheduled.'
   # Commit state FIRST: even if systemd stop fails, a late timer will see 'complete' and do nothing.
   set_mode complete
@@ -636,8 +736,306 @@ confirm() {
     systemctl stop "$(cat "$STATE/rollback_timer")" || warn 'Timer stop failed, but commit state prevents rollback.'
   fi
   msg "SUCCESS. SSH: $ADMIN via key at TCP/$PORT. UFW: only TCP/80, TCP/443 and TCP/$PORT."
-  msg 'Fail2ban is active. Docker, 3x-ui and the panel port were not installed/opened.'
+  msg 'Fail2ban активен. Docker не устанавливается. Порт панели пока закрыт.'
+  print_complete_instructions
   show_reboot_notice
+  maybe_offer_3x_ui
+}
+# 3x-ui is a separate, optional phase and must NEVER run while SSH rollback
+# is pending. A failed panel/TLS installation does not undo confirmed SSH.
+valid_domain() {
+  local domain="$1" label
+  [[ ${#domain} -ge 4 && ${#domain} -le 253 && "$domain" == *.* ]] || return 1
+  [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || return 1
+  [[ "$domain" != *..* && "$domain" != .* && "$domain" != *. ]] || return 1
+  local -a labels
+  IFS='.' read -r -a labels <<< "$domain"
+  for label in "${labels[@]}"; do
+    [[ ${#label} -ge 1 && ${#label} -le 63 && "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+  done
+  # Do not accept an IP address or a bare local name; require a nonnumeric TLD.
+  [[ "${labels[${#labels[@]}-1]}" =~ ^[A-Za-z][A-Za-z0-9-]+$ ]]
+}
+valid_email() {
+  [[ -z "$1" || ( "$1" =~ ^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ && ${#1} -le 254 ) ]]
+}
+# Read only plain generated alphanumeric fields from the root-only upstream
+# installation summary; never `source` downloaded or mutable config as shell.
+panel_result_value() {
+  local field="$1"
+  [[ "$field" =~ ^XUI_[A-Z_]+$ ]] || return 1
+  [[ -s "$XUI_INSTALL_RESULT" ]] || return 1
+  awk -F= -v key="$field" '$1==key && $2 ~ /^[a-zA-Z0-9_-]+$/ { print $2; exit }' "$XUI_INSTALL_RESULT"
+}
+print_panel_tunnel_instructions() {
+  local panelport="$1" domain="$2" basepath="$3" public_ip
+  public_ip="$(ssh_server_ip)"
+  print_step_title 'ДОСТУП К ПАНЕЛИ 3x-ui: ТОЛЬКО ЧЕРЕЗ SSH-ТУННЕЛЬ'
+  printf '%s\n' 'Порт панели закрыт снаружи. Настройка UFW НЕ изменялась.'
+  printf '%s\n' 'ШАГ 1. Откройте PowerShell на Windows и оставьте команду работающей:'
+  printf '  ssh -N -L 127.0.0.1:%s:127.0.0.1:%s -i "$env:USERPROFILE\\.ssh\\vpn_vps" -p %s %s@%s\n' \
+    "$panelport" "$panelport" "$PORT" "$ADMIN" "$public_ip"
+  printf '\n%s\n' 'ШАГ 2. Чтобы сертификат для домена проверялся БЕЗ предупреждения,'
+  printf '%s\n' 'на своём ПК пропишите ЭТОТ ОТДЕЛЬНЫЙ ДОМЕН панели на 127.0.0.1'
+  printf '%s\n' 'в Windows hosts (запуск Блокнота с правами администратора):'
+  printf '  127.0.0.1 %s\n' "$domain"
+  printf 'Файл: C:\\Windows\\System32\\drivers\\etc\\hosts\n'
+  printf '%s\n' 'ВАЖНО: домен панели не должен одновременно использоваться для VPN-клиентов.'
+  printf '\n%s\n' 'ШАГ 3. Откройте в браузере Windows через SSH-туннель:'
+  printf '  https://%s:%s/%s\n' "$domain" "$panelport" "$basepath"
+  printf '%s\n' 'Убрать перенаправление можно удалением этой строки из hosts.'
+  printf '%s\n' 'Для управления панелью на сервере: sudo x-ui'
+}
+panel_info() {
+  require_ubuntu
+  read_saved
+  [[ "$MODE" == complete ]] || die 'Сначала завершите SSH-настройку командами finalize и confirm.'
+  if [[ ! -e "$PANEL_DOMAIN_FILE" || ! -s "$PANEL_DOMAIN_FILE" ]]; then
+    msg 'Установленная этим скриптом 3x-ui пока не обнаружена.'
+    printf 'Установить: sudo %s install-3x-ui\n' "$SELF"
+    return 0
+  fi
+  local domain panel_port base_path user pass cert_status listen_ip
+  domain="$(cat "$PANEL_DOMAIN_FILE")"
+  valid_domain "$domain" || die 'Сохранён некорректный домен панели.'
+  if [[ ! -x /usr/local/x-ui/x-ui ]]; then die '3x-ui executable not found; installation may be incomplete.'; fi
+  panel_port="$(panel_result_value XUI_PANEL_PORT || true)"
+  base_path="$(panel_result_value XUI_WEB_BASE_PATH || true)"
+  user="$(panel_result_value XUI_USERNAME || true)"
+  pass="$(panel_result_value XUI_PASSWORD || true)"
+  listen_ip="$(/usr/local/x-ui/x-ui setting -getListenIP true 2>/dev/null || true)"
+  cert_status='НЕ ПОДТВЕРЖДЁН'
+  if [[ -s "/root/cert/${domain}/fullchain.pem" && -s "/root/cert/${domain}/privkey.pem" ]]; then
+    cert_status='Файлы сертификата присутствуют'
+  fi
+  print_step_title 'НАСТРОЙКИ 3x-ui'
+  printf 'Домен: %s\nПорт панели: %s\nПуть: /%s\nПользователь: %s\n' \
+    "$domain" "${panel_port:-неизвестен}" "${base_path:-неизвестен}" "${user:-см. sudo x-ui}"
+  printf 'Пароль (виден только root): %s\n' "${pass:-см. sudo x-ui для сброса}"
+  printf 'SSL: %s\nПривязка панели: %s\n' "$cert_status" "${listen_ip:-не удалось проверить}"
+  printf '%s\n' 'Учетные данные хранятся в /etc/x-ui/install-result.env (root, 0600).'
+  if [[ "$panel_port" =~ ^[0-9]+$ && -n "$base_path" ]]; then
+    print_panel_tunnel_instructions "$panel_port" "$domain" "$base_path"
+  fi
+}
+preflight_panel_domain() {
+  local domain="$1" server_ip addresses
+  server_ip="$(ssh_server_ip)"
+  addresses="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | LC_ALL=C sort -u || true)"
+  [[ -n "$addresses" ]] || die "DNS A для $domain не найден. Создайте A-запись на IP VPS и повторите установку."
+  msg "DNS A для $domain: $(tr '\n' ' ' <<< "$addresses")"
+  if [[ "$server_ip" != SERVER_IP ]]; then
+    if ! grep -Fxq -- "$server_ip" <<< "$addresses"; then
+      die "Домен $domain сейчас НЕ указывает на публичный IP VPS ($server_ip). Исправьте DNS; для Cloudflare отключите proxy (DNS only), затем повторите."
+    fi
+  else
+    warn 'Публичный IP VPS не удалось автоматически определить. Сравните DNS вручную с IP провайдера.'
+    printf '%s\n' 'Если A-запись действительно указывает на этот VPS, введите DNS-OK; иначе Enter:'
+    local yes
+    read -r yes
+    [[ "$yes" == DNS-OK ]] || die 'DNS проверка не подтверждена.'
+  fi
+  if listening 80; then
+    die 'Порт 80 уже занят локальным процессом. ACME HTTP-01 не сможет выдать сертификат, освободите порт 80.'
+  fi
+  check_ufw_policy && check_allowed_rules no || die 'Сначала устраните проблемы UFW (нужны только 80/443/SSH).'
+}
+check_panel_tls() {
+  local domain="$1" panel_port="$2" web_path="$3" cert key result verifycode httpcode listener
+  cert="/root/cert/$domain/fullchain.pem"
+  key="/root/cert/$domain/privkey.pem"
+  [[ -s "$cert" && -s "$key" ]] || { warn "Файлы SSL отсутствуют: $cert или $key"; return 1; }
+  openssl x509 -in "$cert" -noout -checkhost "$domain" | grep -Fq 'does match' || {
+    warn 'Выпущенный сертификат НЕ совпадает с указанным доменом.'; return 1;
+  }
+  openssl x509 -in "$cert" -noout -checkend 604800 >/dev/null || {
+    warn 'Сертификат истекает менее чем через 7 дней.'; return 1;
+  }
+  listener="$(/usr/local/x-ui/x-ui setting -getListenIP true 2>/dev/null || true)"
+  grep -Eq '^listenIP:[[:space:]]+127\.0\.0\.1$' <<< "$listener" || {
+    warn 'Панель не подтверждена как привязанная ТОЛЬКО к 127.0.0.1.'; return 1;
+  }
+  # Enforce the actual TCP bind address, not just the setting stored in SQLite.
+  if ! ss -H -lnt | awk -v want="127.0.0.1:${panel_port}" -v port="$panel_port" '
+    { local_addr=$4; p=local_addr; sub(/^.*:/, "", p);
+      if (p==port) { if (local_addr==want) good=1; else bad=1 } }
+    END {exit(!good || bad)}'; then
+    warn 'Панель слушает не только 127.0.0.1 или ещё не запущена.'
+    return 1
+  fi
+  # A TLS handshake to localhost while validating the actual domain; no -k.
+  # A login page can return a redirect/4xx; HTTP 000 means no response.
+  result="$(curl --noproxy '*' --silent --show-error --max-time 12 \
+    --resolve "${domain}:${panel_port}:127.0.0.1" \
+    -o /dev/null -w '%{ssl_verify_result} %{http_code}' \
+    "https://${domain}:${panel_port}/${web_path}" 2>/dev/null || true)"
+  verifycode="${result%% *}"
+  httpcode="${result##* }"
+  if [[ "$verifycode" != 0 || ! "$httpcode" =~ ^[1-5][0-9][0-9]$ ]]; then
+    warn "HTTPS-проверка не пройдена (TLS-verify=${verifycode:-?}, HTTP=${httpcode:-?})."
+    return 1
+  fi
+  return 0
+}
+check_acme_renewal() {
+  local domain="$1" acme='/root/.acme.sh/acme.sh'
+  [[ -x "$acme" ]] || { warn 'acme.sh не найден.'; return 1; }
+  systemctl enable --now cron.service >/dev/null || { warn 'cron не запускается.'; return 1; }
+  crontab -u root -l 2>/dev/null | grep -Fq '.acme.sh/acme.sh' || {
+    warn 'Не найдена задача acme.sh в root crontab.'; return 1;
+  }
+  "$acme" --list 2>/dev/null | awk 'NR>1{print $1}' | grep -Fxq "$domain" || {
+    warn "Не найден ACME-заказ для домена $domain."; return 1;
+  }
+  return 0
+}
+install_3x_ui() {
+  require_ubuntu
+  require_tty
+  lock_setup
+  read_saved
+  [[ "$MODE" == complete ]] || {
+    print_next_steps
+    die '3x-ui можно устанавливать ТОЛЬКО после успешного confirm.'
+  }
+  verify_final || die 'Проверка SSH/UFW/Fail2ban не пройдена; установка 3x-ui отменена.'
+  if [[ -x /usr/local/x-ui/x-ui || -e /etc/x-ui/x-ui.db ]] || command -v x-ui >/dev/null 2>&1; then
+    warn '3x-ui уже существует: повторная установка может потерять настройки. Ничего не перезаписываем.'
+    printf 'Для управления: sudo x-ui; для проверки: sudo %s panel-info\n' "$SELF"
+    return 1
+  fi
+  local domain email yes new_port new_path new_username new_password public_ip temp_dir tmp_installer basepath persisted_ip
+  print_step_title 'ОПЦИОНАЛЬНАЯ УСТАНОВКА 3x-ui (официальный репозиторий MHSanaei/3x-ui)'
+  printf '%s\n' 'Панель будет слушать только 127.0.0.1 (доступ через SSH-туннель).'
+  printf '%s\n' 'Извне останутся открыты ТОЛЬКО TCP 80, 443 и SSH-порт.'
+  printf '%s\n' 'Укажите ОТДЕЛЬНЫЙ поддомен для панели, например panel.example.com.'
+  printf '%s\n' 'Создайте DNS A-запись этого поддомена на публичный IP VPS.'
+  printf 'Домен панели (Enter — отменить установку): '
+  IFS= read -r domain
+  domain="${domain,,}"
+  [[ -n "$domain" ]] || { msg 'Установка 3x-ui отменена. Настройки SSH не изменены.'; return 0; }
+  valid_domain "$domain" || die 'Некорректный домен: требуется FQDN вида panel.example.com (ASCII/Punycode).'
+  printf 'Email для Lets Encrypt (необязательно, Enter — пропустить): '
+  IFS= read -r email
+  valid_email "$email" || die 'Некорректный email.'
+  preflight_panel_domain "$domain"
+  command -v curl >/dev/null && command -v openssl >/dev/null || die 'Нужны curl и openssl.'
+  new_port=''
+  local i
+  for ((i=0; i<40; i++)); do
+    new_port="$(shuf -i 30000-60999 -n 1)"
+    if [[ "$new_port" != "$PORT" && "$new_port" != 21086 ]] && ! listening "$new_port"; then break; fi
+  done
+  (( i < 40 )) || die 'Не удалось подобрать свободный порт панели.'
+  new_path="panel$(openssl rand -hex 12)"
+  new_username="admin$(openssl rand -hex 5)"
+  new_password="$(openssl rand -hex 18)"
+  printf '\nДомен: %s | Порт панели: %s | путь: /%s\n' "$domain" "$new_port" "$new_path"
+  printf '%s\n' 'Установка официального 3x-ui + сертификат Lets Encrypt + cron auto-renew.'
+  printf 'Введите INSTALL-3XUI для подтверждения: '
+  IFS= read -r yes
+  [[ "$yes" == INSTALL-3XUI ]] || { msg 'Установка 3x-ui отменена. SSH-настройки не изменены.'; return 0; }
+  # Bring the durable installed helper to the downloaded verified version.
+  local self_source
+  self_source="$(readlink -f "$0")"
+  if [[ "$self_source" != "$SELF" && -f "$self_source" ]]; then
+    install -m 0700 -o root -g root "$self_source" "$SELF"
+  fi
+  temp_dir="$(mktemp -d /root/.vpn-xui-installer.XXXXXXXX)"
+  tmp_installer="$temp_dir/install.sh"
+  msg 'Скачиваю установщик с официального GitHub MHSanaei/3x-ui (latest stable).'
+  if ! curl --fail --location --show-error --silent --retry 2 --connect-timeout 15 --max-time 120 \
+    "$XUI_INSTALLER_URL" -o "$tmp_installer"; then
+    rm -rf "$temp_dir"
+    die 'Не удалось скачать официальный скрипт.'
+  fi
+  if [[ ! -s "$tmp_installer" ]] || ! bash -n "$tmp_installer"; then
+    rm -rf "$temp_dir"
+    die 'Установщик не прошёл проверку bash -n.'
+  fi
+  printf '\nИсходный установщик: %s\nSHA-256: ' "$XUI_INSTALLER_URL"
+  sha256sum "$tmp_installer" | awk '{print $1}'
+  printf '%s\n' 'Если вам необходимо изучить код перед запуском, нажмите Ctrl+C сейчас.'
+  msg 'Запуск официального установщика с автонастройкой SSL для домена.'
+  # This is an upstream script, not our own; errors affect 3x-ui, never SSH.
+  # The official installer writes credentials in /etc/x-ui/install-result.env mode 0600.
+  local install_rc=0
+  XUI_NONINTERACTIVE=1 XUI_SSL_MODE=domain XUI_DOMAIN="$domain" XUI_ACME_EMAIL="$email" \
+  XUI_PANEL_PORT="$new_port" XUI_WEB_BASE_PATH="$new_path" \
+  XUI_USERNAME="$new_username" XUI_PASSWORD="$new_password" \
+  XUI_DB_TYPE=sqlite XUI_ENABLE_FAIL2BAN=false \
+  bash "$tmp_installer" || install_rc=$?
+  rm -rf "$temp_dir"
+  if (( install_rc != 0 )); then
+    warn "Установка 3x-ui завершилась ошибкой (код $install_rc). Защита SSH сохранена."
+    printf '%s\n' 'Диагностика: sudo systemctl status x-ui --no-pager; sudo journalctl -u x-ui -n 60 --no-pager'
+    return "$install_rc"
+  fi
+  [[ -x /usr/local/x-ui/x-ui ]] || die 'Установщик завершился, но бинарный файл /usr/local/x-ui/x-ui отсутствует.'
+  systemctl is-active --quiet x-ui.service || die 'Служба x-ui не запущена.'
+  # Allow local access only. No UFW rule for the web admin port.
+  msg 'Ограничиваю интерфейс панели адресом 127.0.0.1; наружу порт не открываю.'
+  /usr/local/x-ui/x-ui setting -listenIP '127.0.0.1' || die 'Не удалось настроить loopback.'
+  systemctl restart x-ui.service || die 'Не удалось перезапустить x-ui после ограничения доступа.'
+  sleep 2
+  systemctl is-active --quiet x-ui.service || die 'x-ui остановился после настройки 127.0.0.1.'
+  # Sensitive install result is stored upstream; don't create an extra secret store.
+  local recorded_username recorded_password recorded_port recorded_path credentials_verified=true
+  recorded_username="$(panel_result_value XUI_USERNAME || true)"
+  recorded_password="$(panel_result_value XUI_PASSWORD || true)"
+  recorded_port="$(panel_result_value XUI_PANEL_PORT || true)"
+  recorded_path="$(panel_result_value XUI_WEB_BASE_PATH || true)"
+  if [[ "$recorded_username" != "$new_username" || "$recorded_password" != "$new_password" ||
+        "$recorded_port" != "$new_port" || "$recorded_path" != "$new_path" ]]; then
+    credentials_verified=false
+    warn 'Официальный установщик не подтвердил все созданные учетные данные в /etc/x-ui/install-result.env.'
+    warn 'Проверьте вывод установщика и команду sudo x-ui для получения/сброса параметров.'
+  fi
+  printf '%s\n' "$domain" > "$PANEL_DOMAIN_FILE"
+  chmod 0600 "$PANEL_DOMAIN_FILE"
+  msg 'Проверяю сертификат, соединение HTTPS и автоматическое продление.'
+  local tls_ok=true renewal_ok=true
+  check_panel_tls "$domain" "$new_port" "$new_path" || tls_ok=false
+  check_acme_renewal "$domain" || renewal_ok=false
+  print_step_title 'РЕЗУЛЬТАТ УСТАНОВКИ 3x-ui'
+  printf 'Домен: %s\nПорт панели (только localhost): %s\nПуть: /%s\n' "$domain" "$new_port" "$new_path"
+  if [[ "$credentials_verified" == true ]]; then
+    printf 'Логин: %s\nПароль: %s\n' "$recorded_username" "$recorded_password"
+  else
+    printf '%s\n' 'Логин/пароль: НЕ ПОДТВЕРЖДЕНЫ (используйте sudo x-ui).'
+  fi
+  printf 'Сертификат: /root/cert/%s/fullchain.pem\nКлюч: /root/cert/%s/privkey.pem\n' "$domain" "$domain"
+  if [[ "$tls_ok" == true && "$renewal_ok" == true ]]; then
+    msg 'SSL, HTTPS и плановое продление сертификата подтверждены.'
+  else
+    warn 'НЕ ВСЕ проверки SSL/автопродления прошли. Не объявляем панель полностью настроенной.'
+    printf '%s\n' 'Проверьте DNS/порт 80 и выполните: sudo x-ui → SSL Certificate Management.'
+    printf '%s\n' 'Продление: sudo crontab -l; sudo systemctl status cron'
+  fi
+  print_panel_tunnel_instructions "$new_port" "$domain" "$new_path"
+  printf '\nПосмотреть настройки позже: sudo %s panel-info\n' "$SELF"
+  # Warn callers with nonzero status if SSL or renewal isn't verified.
+  [[ "$tls_ok" == true && "$renewal_ok" == true && "$credentials_verified" == true ]]
+}
+maybe_offer_3x_ui() {
+  if [[ ! -t 0 ]]; then
+    msg "3x-ui не установлен. Для установки позже: sudo $SELF install-3x-ui"
+    return 0
+  fi
+  print_step_title 'ДОПОЛНИТЕЛЬНО: УСТАНОВИТЬ 3x-ui?'
+  printf '%s\n' 'SSH/UFW/Fail2ban уже защищены, и порт 22 закрыт.'
+  printf '%s\n' 'Хотите сразу установить 3x-ui, домен, SSL и автопродление? [y/N]: '
+  local choice
+  IFS= read -r choice
+  case "$choice" in
+    y|Y|yes|YES|да|ДА|Да)
+      # confirm() holds a flock descriptor; release it before acquiring again.
+      flock -u 9 >/dev/null 2>&1 || true
+      install_3x_ui || warn 'Дополнительная установка 3x-ui не завершена; SSH/UFW/Fail2ban УЖЕ подтверждены.' ;;
+    *)
+      msg '3x-ui не установлен. Установить позже:'
+      printf '  sudo %s install-3x-ui\n' "$SELF" ;;
+  esac
 }
 status() {
   require_ubuntu
@@ -651,19 +1049,41 @@ status() {
   if [[ -s "$STATE/rollback_timer" ]]; then
     systemctl is-active "$(cat "$STATE/rollback_timer")" || true
   fi
+  if [[ -s "$PANEL_DOMAIN_FILE" ]]; then
+    msg 'Для просмотра параметров 3x-ui: sudo /usr/local/sbin/vpn-vps-hardening panel-info'
+  fi
+  print_next_steps
 }
 usage() {
   cat <<EOF_USAGE
-vpn-vps-hardening.sh v$VERSION (Ubuntu 24.04 LTS)
-  sudo bash vpn-vps-hardening.sh prepare        # New server OR resume interrupted initial install
-  sudo --preserve-env=SSH_CONNECTION $SELF finalize  # Via NEW SSH session
-  sudo --preserve-env=SSH_CONNECTION $SELF confirm   # Via THIRD SSH session
-  sudo $SELF status
+vpn-vps-hardening.sh v$VERSION — Ubuntu 24.04 LTS, VPS для 3x-ui
 
-Only on a dedicated fresh Ubuntu VPS (also supports legacy 'setup-failed' state).
-Upgrades installed packages first; does not reboot automatically or install Docker / 3x-ui.
-Obtain VPS provider console access and a snapshot before starting.
-Original conflicting SSH configs are preserved under /var/lib/vpn-vps-hardening/ssh-port-backups/.
+Последовательность из ТРЁХ ЭТАПОВ (не запускайте все команды подряд):
+  1. sudo bash vpn-vps-hardening.sh prepare
+     Обновление системы, подготовка SSH, UFW и Fail2ban.
+     Затем войдите по SSH-ключу из ВТОРОГО окна PowerShell на новый порт.
+
+  2. sudo --preserve-env=SSH_CONNECTION $SELF finalize
+     Выполнить только из второй, новой SSH-сессии.
+     Порт 22 закрывается, парольный вход отключается, включается таймер отката.
+
+  3. sudo --preserve-env=SSH_CONNECTION $SELF confirm
+     Выполнить только из ТРЕТЬЕЙ, новой SSH-сессии.
+     Проверка входа и остановка таймера автоматического отката.
+
+  sudo $SELF next       — показать инструкции для ТЕКУЩЕГО этапа
+  sudo $SELF status     — статус сервера и дальнейшие шаги
+  sudo $SELF --version — версия скрипта
+  sudo $SELF install-3x-ui — ПОСЛЕ confirm: установить 3x-ui + домен + SSL
+  sudo $SELF panel-info   — показать сохранённые настройки 3x-ui
+
+  ИНФОРМАЦИЯ ПО БЕЗОПАСНОСТИ
+  Перед запуском сделайте snapshot и проверьте аварийную консоль провайдера.
+  Не закрывайте текущий SSH-сеанс до успешного confirm.
+  Не перезагружайте Ubuntu до confirm и проверки нового подключения.
+  Скрипт НЕ устанавливает Docker, VPN-инбаунды или веб-сервер.
+  3x-ui устанавливается опционально ПОСЛЕ подтверждения SSH.
+  Бэкапы конфликтующих SSH-конфигураций: $STATE/ssh-port-backups/.
 EOF_USAGE
 }
 main() {
@@ -674,6 +1094,9 @@ main() {
     confirm) confirm ;;
     rollback) rollback ;;
     status) status ;;
+    next|guide|what-next) next_steps ;;
+    install-3x-ui|setup-3x-ui) install_3x_ui ;;
+    panel-info|3x-ui-info) panel_info ;;
     --version|-v) printf '%s\n' "$VERSION" ;;
     --help|-h|'') usage ;;
     *) usage; die "Unknown operation: $1" ;;
